@@ -75,8 +75,9 @@
     if (nav.dataset.auSidenavInit === "1") return;
     nav.dataset.auSidenavInit = "1";
 
-    // 1. For every <li> that has a sublist, default to collapsed and
-    //    wire up the toggle button + ARIA attrs.
+    // 1. For every <li> that has a sublist, default to collapsed (or expanded
+    //    when the authored markup opts in via data-au-default-expanded="true")
+    //    and wire up the toggle button + ARIA attrs.
     var idCounter = 0;
     var parentItems = nav.querySelectorAll("." + CLS.item);
     for (var i = 0; i < parentItems.length; i++) {
@@ -84,13 +85,14 @@
       var sublist = li.querySelector(":scope > ." + CLS.sublist);
       if (!sublist) continue;
 
-      li.classList.add(CLS.collapsed);
+      var startExpanded = li.dataset.auDefaultExpanded === "true";
+      li.classList.add(startExpanded ? CLS.expanded : CLS.collapsed);
 
       var btn = li.querySelector(":scope > ." + CLS.toggle);
       if (btn) {
         if (!sublist.id) sublist.id = "au-sidenav-sub-" + (++idCounter);
         btn.setAttribute("aria-controls", sublist.id);
-        btn.setAttribute("aria-expanded", "false");
+        btn.setAttribute("aria-expanded", startExpanded ? "true" : "false");
         if (!btn.hasAttribute("aria-label") && !btn.textContent.trim()) {
           btn.setAttribute("aria-label", "Toggle submenu");
         }

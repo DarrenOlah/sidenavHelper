@@ -157,6 +157,103 @@ describe('generateSidenavHtml', () => {
     })
   })
 
+  describe('rootMode', () => {
+    // A picked-root forest is a single-element array (matches what
+    // selectSubtree returns in App.tsx). The mode only takes effect for
+    // single-root forests; multi-root forests render as before.
+    const root = parent('1', 'About', '/about/', [
+      leaf('2', 'Team', '/about/team/'),
+      parent('3', 'History', '/about/history/', [
+        leaf('4', 'Founders', '/about/history/founders/'),
+      ]),
+    ])
+
+    it("'parent' renders the root as a parent <li> with sublist (legacy default)", () => {
+      const html = generateSidenavHtml([root], { rootMode: 'parent', hrefMode: 'absolute' })
+      expect(html).toContain('<a href="/about/">About</a>')
+      expect(html).toContain('<ul class="au-sidenav__sublist">')
+      expect(html).toContain('<a href="/about/team/">Team</a>')
+      expect(html).toContain('<a href="/about/history/founders/">Founders</a>')
+    })
+
+    it("'hide' omits the root and renders its children at top level", () => {
+      const html = generateSidenavHtml([root], { rootMode: 'hide', hrefMode: 'absolute' })
+      expect(html).not.toContain('>About<')
+      expect(html).toContain('<a href="/about/team/">Team</a>')
+      expect(html).toContain('<a href="/about/history/">History</a>')
+      // History keeps its own children since only the picked root is reshaped.
+      expect(html).toContain('<a href="/about/history/founders/">Founders</a>')
+    })
+
+    it("'sibling' renders the root as a leaf first, then its children as siblings", () => {
+      const html = generateSidenavHtml([root], { rootMode: 'sibling', hrefMode: 'absolute' })
+      const aboutIdx = html.indexOf('>About<')
+      const teamIdx = html.indexOf('>Team<')
+      expect(aboutIdx).toBeGreaterThan(-1)
+      expect(teamIdx).toBeGreaterThan(aboutIdx)
+      // Root is a leaf in sibling mode — no chevron/sublist for the About row.
+      // (Team and History are at the same nesting level as About, not below it.)
+      const aboutBlock = html.slice(aboutIdx, teamIdx)
+      expect(aboutBlock).not.toContain('au-sidenav__toggle')
+      // History keeps its own children since only the picked root is reshaped.
+      expect(html).toContain('<a href="/about/history/founders/">Founders</a>')
+    })
+
+    it("'parent-expanded' tags the root <li> with data-au-default-expanded", () => {
+      const html = generateSidenavHtml([root], { rootMode: 'parent-expanded', hrefMode: 'absolute' })
+      // Root <li> opens with the marker.
+      expect(html).toMatch(/<li class="au-sidenav__item" data-au-default-expanded="true">\s*\n\s*<a href="\/about\/">About<\/a>/)
+      // Marker only on the root, not nested parents like History.
+      expect(html.match(/data-au-default-expanded/g) ?? []).toHaveLength(1)
+      // Children still render nested as in 'parent' mode.
+      expect(html).toContain('<a href="/about/team/">Team</a>')
+      expect(html).toContain('<a href="/about/history/founders/">Founders</a>')
+    })
+
+    it("'parent-expanded' falls back to plain class on multi-root forests", () => {
+      const forest = [leaf('1', 'A', '/a/'), leaf('2', 'B', '/b/')]
+      const html = generateSidenavHtml(forest, { rootMode: 'parent-expanded', hrefMode: 'absolute' })
+      expect(html).not.toContain('data-au-default-expanded')
+    })
+
+    it("'sibling' uses rootSiblingLabel when provided", () => {
+      const html = generateSidenavHtml([root], {
+        rootMode: 'sibling',
+        hrefMode: 'absolute',
+        rootSiblingLabel: 'About Home',
+      })
+      expect(html).toContain('>About Home<')
+    })
+
+    it('rootMode is ignored for multi-root forests', () => {
+      const forest = [leaf('1', 'A', '/a/'), leaf('2', 'B', '/b/')]
+      const html = generateSidenavHtml(forest, { rootMode: 'hide', hrefMode: 'absolute' })
+      expect(html).toContain('>A<')
+      expect(html).toContain('>B<')
+    })
+  })
+
+  describe('hrefMode', () => {
+    it("'site-root-relative' (default) strips protocol+host", () => {
+      const html = generateSidenavHtml([leaf('1', 'A', 'https://example.com/foo/bar?x=1#h')])
+      expect(html).toContain('href="/foo/bar?x=1#h"')
+      expect(html).not.toContain('https://example.com')
+    })
+
+    it("'absolute' preserves the full URL", () => {
+      const html = generateSidenavHtml(
+        [leaf('1', 'A', 'https://example.com/foo/bar')],
+        { hrefMode: 'absolute' },
+      )
+      expect(html).toContain('href="https://example.com/foo/bar"')
+    })
+
+    it('site-root-relative leaves already-relative hrefs untouched', () => {
+      const html = generateSidenavHtml([leaf('1', 'A', '/foo/bar')])
+      expect(html).toContain('href="/foo/bar"')
+    })
+  })
+
   it('produces output that round-trips through parseSitemapHtml with the same structure', () => {
     const original: SitemapNode[] = [
       parent('1', 'Parent', '/p/', [

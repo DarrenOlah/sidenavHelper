@@ -292,8 +292,23 @@ export function selectSubtree(roots: SitemapNode[], id: string): SitemapNode[] {
 
 // ── Output ──────────────────────────────────────────────────────────────────
 
+export type RootMode = 'parent' | 'parent-expanded' | 'hide' | 'sibling'
+export type HrefMode = 'absolute' | 'site-root-relative'
+
 export interface GenerateOptions {
   headerText?: string
+  // How to render the picked root (only applies when `roots.length === 1`):
+  //   'parent'          — root is a top-level <li> with its children as a sublist (legacy default)
+  //   'parent-expanded' — same as 'parent', but tagged with data-au-default-expanded
+  //                       so sidenav.js starts the root expanded instead of collapsed
+  //   'hide'            — root is omitted; its children become the top-level items
+  //   'sibling'         — root is a leaf <li> first, followed by its children as siblings
+  rootMode?: RootMode
+  // 'absolute' keeps hrefs verbatim. 'site-root-relative' strips protocol+host
+  // (e.g. https://example.com/a/b → /a/b), keeping path+query+hash.
+  hrefMode?: HrefMode
+  // Optional override for the root's label when rootMode === 'sibling'.
+  rootSiblingLabel?: string
 }
 
 // Emit a <nav class="au-sidenav"> block matching the markup format authored
@@ -311,10 +326,17 @@ export function generateSidenavHtml(
 ): string {
   const headerText = options.headerText?.trim() || 'In this section'
   const header = escapeHtml(headerText)
+  const hrefMode: HrefMode = options.hrefMode ?? 'site-root-relative'
+  const rootMode: RootMode = options.rootMode ?? 'parent'
 
-  const itemsHtml = roots
+  const topLevel = applyRootMode(roots, rootMode, options.rootSiblingLabel)
+  // 'parent-expanded' adds data-au-default-expanded to the root <li> only.
+  // Only meaningful when a single root is rendered as a parent.
+  const expandRoot = rootMode === 'parent-expanded' && roots.length === 1
+
+  const itemsHtml = topLevel
     .filter(n => n.included)
-    .map(n => renderItem(n, 2))
+    .map((n, i) => renderItem(n, 2, hrefMode, expandRoot && i === 0))
     .join('\n\n')
 
   const inner = itemsHtml ? '\n\n' + itemsHtml + '\n\n  ' : '\n  '
@@ -325,23 +347,55 @@ export function generateSidenavHtml(
 </nav>`
 }
 
-function renderItem(node: SitemapNode, indent: number): string {
+// Reshape the top-level forest based on rootMode. Only takes effect when a
+// single root has been picked (roots.length === 1) — whole-sitemap mode is
+// always rendered as-is.
+function applyRootMode(
+  roots: SitemapNode[],
+  mode: RootMode,
+  siblingLabel: string | undefined,
+): SitemapNode[] {
+  if (roots.length !== 1) return roots
+  const root = roots[0]
+  if (mode === 'hide') return root.children
+  if (mode === 'sibling') {
+    const label = siblingLabel?.trim() || root.label
+    const rootAsLeaf: SitemapNode = { ...root, label, children: [] }
+    return [rootAsLeaf, ...root.children]
+  }
+  return roots
+}
+
+function renderItem(
+  node: SitemapNode,
+  indent: number,
+  hrefMode: HrefMode,
+  defaultExpanded = false,
+): string {
   const pad = ' '.repeat(indent)
   const label = escapeHtml(node.label || node.defaultLabel || '')
-  const href = escapeAttr(safeHref(node.href))
+  const href = escapeAttr(safeHref(transformHref(node.href, hrefMode)))
 
   const includedChildren = node.children.filter(c => c.included)
 
   if (includedChildren.length === 0) {
+    // defaultExpanded only meaningful for parents — leaves ignore it.
     return `${pad}<li class="au-sidenav__item">\n${pad}  <a href="${href}">${label}</a>\n${pad}</li>`
   }
 
   const childrenHtml = includedChildren
-    .map(c => renderItem(c, indent + 4))
+    .map(c => renderItem(c, indent + 4, hrefMode))
     .join('\n')
 
+  // Marker honored by sidenav.js to start this <li> expanded instead of the
+  // default collapsed state. Kept as a data attribute (not a class) so we
+  // don't violate the "don't pre-set --collapsed/--expanded" rule.
+  const liAttrs = defaultExpanded
+    ? 'class="au-sidenav__item" data-au-default-expanded="true"'
+    : 'class="au-sidenav__item"'
+
   return [
-    `${pad}<li class="au-sidenav__item">`,
+    `${pad}<li ${liAttrs}>`,
     `${pad}  <a href="${href}">${label}</a>`,
     `${pad}  <button type="button" class="au-sidenav__toggle" aria-label="Toggle submenu"></button>`,
     `${pad}  <ul class="au-sidenav__sublist">`,
@@ -349,6 +403,19 @@ function renderItem(node: SitemapNode, indent: number): string {
     `${pad}  </ul>`,
     `${pad}</li>`,
   ].join('\n')
+}
+
+// Strip protocol+host when in site-root-relative mode. Anything that doesn't
+// parse as an absolute URL (e.g. already-relative hrefs, empty strings) is
+// returned untouched — safeHref/REJECTED_SCHEMES still gate the result.
+function transformHref(href: string, mode: HrefMode): string {
+  if (mode === 'absolute' || !href) return href
+  try {
+    const u = new URL(href)
+    return (u.pathname || '/') + u.search + u.hash
+  } catch {
+    return href
+  }
 }
 
 // Defense-in-depth: even though resolveHref strips dangerous schemes during

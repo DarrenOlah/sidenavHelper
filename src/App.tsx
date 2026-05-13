@@ -20,8 +20,11 @@ import { CSS } from '@dnd-kit/utilities'
 // component changes, copy sidenav.css/sidenav.js from au-components/sidenav/
 // over the files in src/vendor/au-sidenav/.
 import sidenavCss from './vendor/au-sidenav/sidenav.css?raw'
-// Side-effect import: the sidenav IIFE registers window.AuSidenav.
+// Side-effect import: the sidenav IIFE registers window.AuSidenav for the
+// in-helper preview. The same source is also imported as a raw string so we
+// can optionally embed it in the copied output as a <script> block.
 import './vendor/au-sidenav/sidenav.js'
+import sidenavJs from './vendor/au-sidenav/sidenav.js?raw'
 
 declare global {
   interface Window {
@@ -41,6 +44,8 @@ import {
   selectSubtree,
   findNode,
   type SitemapNode,
+  type RootMode,
+  type HrefMode,
 } from './lib/sitemap'
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -49,6 +54,10 @@ interface State {
   forest: SitemapNode[]
   rootId: string | null
   headerText: string
+  rootMode: RootMode
+  hrefMode: HrefMode
+  includeCss: boolean
+  includeJs: boolean
   pageCount: number
   maxDepth: number
   parseError: string
@@ -58,6 +67,10 @@ const INITIAL_STATE: State = {
   forest: [],
   rootId: null,
   headerText: 'In this section',
+  rootMode: 'sibling',
+  hrefMode: 'site-root-relative',
+  includeCss: false,
+  includeJs: false,
   pageCount: 0,
   maxDepth: 0,
   parseError: '',
@@ -90,15 +103,41 @@ export default function App() {
   const [copied, setCopied] = useState(false)
   const pasteRef = useRef<HTMLDivElement | null>(null)
 
-  const { forest, rootId, headerText, pageCount, maxDepth, parseError } = state
+  const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, pageCount, maxDepth, parseError } = state
 
   const hasForest = forest.length > 0
+  const hasPickedRoot = rootId !== null && findNode(forest, rootId) !== null
   const activeForest = useMemo(() => rootId ? selectSubtree(forest, rootId) : forest, [forest, rootId])
 
+  // The editable tree mirrors what the generated HTML will contain. When a
+  // root is picked, reshape based on rootMode so what the user edits matches
+  // what they'll get. Top-level reorders in 'sibling' mode are translated
+  // to operate on the underlying root.children (see handleReorder).
+  const displayedForest = useMemo(() => {
+    if (!hasPickedRoot || activeForest.length !== 1) return activeForest
+    const root = activeForest[0]
+    if (rootMode === 'hide') return root.children
+    if (rootMode === 'sibling') return [{ ...root, children: [] }, ...root.children]
+    return activeForest
+  }, [activeForest, hasPickedRoot, rootMode])
+
   const generatedHtml = useMemo(
-    () => hasForest ? generateSidenavHtml(activeForest, { headerText }) : '',
-    [hasForest, activeForest, headerText],
+    () => hasForest
+      ? generateSidenavHtml(activeForest, { headerText, rootMode: hasPickedRoot ? rootMode : 'parent', hrefMode })
+      : '',
+    [hasForest, activeForest, headerText, rootMode, hrefMode, hasPickedRoot],
   )
+
+  // The bare <nav> is what the live preview consumes — its CSS and JS are
+  // already attached to the helper's document. The output panel optionally
+  // wraps that nav with <style>/<script> blocks for users whose deployment
+  // can't reference the assets externally.
+  const outputHtml = useMemo(() => {
+    if (!generatedHtml) return ''
+    const css = includeCss ? `<style>\n${sidenavCss}\n</style>\n` : ''
+    const js = includeJs ? `\n<script>\n${sidenavJs}\n</script>` : ''
+    return css + generatedHtml + js
+  }, [generatedHtml, includeCss, includeJs])
 
 
   // ── Handlers ───────────────────────────────────────────────────────────────
@@ -142,8 +181,37 @@ export default function App() {
     ingestHtml(e.target.value)
   }
 
+  // Strip the auto-added " Home" suffix from a root, but only when we know we
+  // added it ourselves (label is exactly `${defaultLabel} Home`). If the user
+  // edited the label further, or "Home" was part of the original label, this
+  // is a no-op.
+  const stripAutoHomeSuffix = (forest: SitemapNode[], id: string | null): SitemapNode[] => {
+    if (!id) return forest
+    const node = findNode(forest, id)
+    if (!node || node.label !== `${node.defaultLabel} Home`) return forest
+    return renameNode(forest, id, node.defaultLabel)
+  }
+
+  // Auto-suggest "${defaultLabel} Home" as the root's label, but only if the
+  // user hasn't customized it. Reused by handleSetRoot and handleRootMode.
+  const applyAutoHomeSuffix = (forest: SitemapNode[], id: string): SitemapNode[] => {
+    const node = findNode(forest, id)
+    if (!node || node.label !== node.defaultLabel) return forest
+    return renameNode(forest, id, `${node.defaultLabel} Home`)
+  }
+
+  // When picking a root in 'sibling' mode, suggest "{name} Home" as the
+  // root's label. When switching away from a previously-picked root, undo
+  // any auto-added " Home" suffix on the old root so it doesn't linger.
   const handleSetRoot = (id: string | null) =>
-    setState(s => ({ ...s, rootId: id }))
+    setState(s => {
+      const oldRootId = s.rootId
+      let forest = oldRootId !== id ? stripAutoHomeSuffix(s.forest, oldRootId) : s.forest
+      if (id !== null && s.rootMode === 'sibling') {
+        forest = applyAutoHomeSuffix(forest, id)
+      }
+      return { ...s, rootId: id, forest }
+    })
 
   const handleRename = (id: string, label: string) =>
     setState(s => ({ ...s, forest: renameNode(s.forest, id, label) }))
@@ -151,15 +219,47 @@ export default function App() {
   const handleToggleInclude = (id: string, included: boolean) =>
     setState(s => ({ ...s, forest: setIncluded(s.forest, id, included) }))
 
+  // In 'sibling' mode, the displayed top-level mixes the pinned root row
+  // (index 0) with the root's actual children (indices 1+). Translate any
+  // top-level drag into a reorder of root.children with both indices shifted
+  // by -1. Drags that involve the pinned root row never reach this handler
+  // because the root's drag handle is disabled.
   const handleReorder = (parentId: string | null, fromIndex: number, toIndex: number) =>
-    setState(s => ({ ...s, forest: reorderSiblings(s.forest, parentId, fromIndex, toIndex) }))
+    setState(s => {
+      if (parentId === null && s.rootMode === 'sibling' && s.rootId) {
+        return {
+          ...s,
+          forest: reorderSiblings(s.forest, s.rootId, fromIndex - 1, toIndex - 1),
+        }
+      }
+      return { ...s, forest: reorderSiblings(s.forest, parentId, fromIndex, toIndex) }
+    })
 
   const handleHeaderText = (val: string) =>
     setState(s => ({ ...s, headerText: val }))
 
+  const handleRootMode = (mode: RootMode) =>
+    setState(s => {
+      if (mode === s.rootMode || !s.rootId) return { ...s, rootMode: mode }
+      // Apply the suffix when entering sibling mode; remove it when leaving.
+      const forest = mode === 'sibling'
+        ? applyAutoHomeSuffix(s.forest, s.rootId)
+        : stripAutoHomeSuffix(s.forest, s.rootId)
+      return { ...s, rootMode: mode, forest }
+    })
+
+  const handleHrefMode = (mode: HrefMode) =>
+    setState(s => ({ ...s, hrefMode: mode }))
+
+  const handleIncludeCss = (val: boolean) =>
+    setState(s => ({ ...s, includeCss: val }))
+
+  const handleIncludeJs = (val: boolean) =>
+    setState(s => ({ ...s, includeJs: val }))
+
   const handleCopy = () => {
-    if (!generatedHtml) return
-    navigator.clipboard.writeText(generatedHtml).then(() => {
+    if (!outputHtml) return
+    navigator.clipboard.writeText(outputHtml).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     })
@@ -172,8 +272,6 @@ export default function App() {
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
-
-  const hasRoot = rootId !== null && findNode(forest, rootId) !== null
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex flex-col">
@@ -196,7 +294,7 @@ export default function App() {
             <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
               <SectionLabel number={1} title="Paste your site index" done={hasForest} />
               <p className="text-xs text-gray-500 mb-2">
-                Open a styled site-index page in your browser, select the visible list, copy, then paste here.
+                Open a styled site-index page in your browser, select the visible list, copy, then paste here. Works best with a hierarchical sitemap based on <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;ul&gt;</code>, <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;li&gt;</code>, and <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;a&gt;</code> tags.
               </p>
               <div
                 ref={pasteRef}
@@ -227,17 +325,65 @@ export default function App() {
             {/* Section 2: Choose root */}
             <div className={`bg-white rounded-xl shadow-sm border border-gray-100 p-4 transition-opacity
               ${hasForest ? 'opacity-100' : 'opacity-50 pointer-events-none'}`}>
-              <SectionLabel number={2} title="Choose the root" done={hasRoot} />
+              <SectionLabel number={2} title="Choose the root" done={hasPickedRoot} />
               <p className="text-xs text-gray-500 mb-2">
-                Click a page to make it the top of your sidenav. The selected page becomes the visible parent; its children become the menu items.
+                Select the root—the page which is the parent of the pages that should appear in the menu.
               </p>
-              <div className="border border-gray-200 rounded-lg max-h-64 overflow-auto">
+              <div className="border border-gray-200 rounded-lg max-h-48 overflow-auto">
                 <RootPicker forest={forest} rootId={rootId} onPick={handleSetRoot} />
               </div>
-              {hasRoot && (
+
+              {hasPickedRoot && (
+                <fieldset className="mt-3">
+                  <legend className="text-xs font-medium text-gray-700 mb-1">Root display</legend>
+                  <div className="space-y-1">
+                    {([
+                      ['sibling', 'Show root as sibling (default)', 'Root appears as the first item, with its children as siblings, with "Home" appended.'],
+                      ['hide', 'Omit root', 'Root is omitted; only its children appear.'],
+                      ['parent', 'Show root as parent', 'Root appears as a parent item, with its children collapsed.'],
+                      ['parent-expanded', 'Show root as parent (children expanded)', 'Root appears as a parent item, with its children expanded by default.'],
+                    ] as const).map(([value, label, hint]) => (
+                      <label key={value} className="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="rootMode"
+                          value={value}
+                          checked={rootMode === value}
+                          onChange={() => handleRootMode(value)}
+                          className="mt-0.5 shrink-0"
+                        />
+                        <span>
+                          <span className="font-medium">{label}</span>
+                          <span className="block text-[11px] text-gray-500">{hint}</span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+              )}
+
+              <fieldset className="mt-3">
+                <legend className="text-xs font-medium text-gray-700 mb-1">Link format</legend>
+                <label className="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={hrefMode === 'absolute'}
+                    onChange={e => handleHrefMode(e.target.checked ? 'absolute' : 'site-root-relative')}
+                    className="mt-0.5 shrink-0"
+                  />
+                  <span>
+                    <span className="font-medium">Include full URLs (protocol + host)</span>
+                    <span className="block text-[11px] text-gray-500">
+                      Off (default): generated hrefs are site-root-relative (e.g. <code>/about/team</code>).
+                    </span>
+                  </span>
+                </label>
+              </fieldset>
+
+              {hasPickedRoot && (
                 <button
                   onClick={() => handleSetRoot(null)}
-                  className="mt-2 text-xs text-blue-600 hover:text-blue-800 underline"
+                  className="mt-3 text-xs text-blue-600 hover:text-blue-800 underline"
                 >
                   Use entire sitemap
                 </button>
@@ -267,8 +413,9 @@ export default function App() {
               </p>
               <div className="border border-gray-200 rounded-lg max-h-[640px] overflow-auto p-2">
                 <EditableTree
-                  nodes={activeForest}
+                  nodes={displayedForest}
                   parentId={null}
+                  pinnedId={hasPickedRoot && rootMode === 'sibling' ? rootId : null}
                   onRename={handleRename}
                   onToggle={handleToggleInclude}
                   onReorder={handleReorder}
@@ -301,6 +448,37 @@ export default function App() {
                   <p className="text-xs text-gray-500 mb-3">
                     Copy and paste this into your DNN HTML module.
                   </p>
+                  <fieldset className="mb-3 space-y-1">
+                    <legend className="text-xs font-medium text-gray-700 mb-1">Include assets inline</legend>
+                    <label className="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={includeCss}
+                        onChange={e => handleIncludeCss(e.target.checked)}
+                        className="mt-0.5 shrink-0"
+                      />
+                      <span>
+                        <span className="font-medium">Embed CSS in a <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;style&gt;</code> tag</span>
+                        <span className="block text-[11px] text-gray-500">
+                          Useful when you can't reference <code className="font-mono">sidenav.css</code> from the page skin.
+                        </span>
+                      </span>
+                    </label>
+                    <label className="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={includeJs}
+                        onChange={e => handleIncludeJs(e.target.checked)}
+                        className="mt-0.5 shrink-0"
+                      />
+                      <span>
+                        <span className="font-medium">Embed JS in a <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;script&gt;</code> tag</span>
+                        <span className="block text-[11px] text-gray-500">
+                          Useful when you can't reference <code className="font-mono">sidenav.js</code> from the page skin.
+                        </span>
+                      </span>
+                    </label>
+                  </fieldset>
                   <div className="bg-gray-900 rounded-lg overflow-hidden">
                     <div className="flex items-center justify-between px-3 py-2 border-b border-gray-700">
                       <span className="text-xs text-gray-400 font-medium">HTML</span>
@@ -313,7 +491,7 @@ export default function App() {
                       </button>
                     </div>
                     <pre className="p-3 text-xs text-green-300 overflow-x-auto overflow-y-auto whitespace-pre font-mono leading-relaxed max-h-[500px]">
-                      {generatedHtml}
+                      {outputHtml}
                     </pre>
                   </div>
                   <div className="mt-3 flex justify-end">
@@ -398,12 +576,16 @@ function RootPickerRow({ node, rootId, onPick, depth }: RootPickerRowProps) {
 interface EditableTreeProps {
   nodes: SitemapNode[]
   parentId: string | null
+  // When set, the row whose id matches is rendered without a working drag
+  // handle and is excluded from reorders. Used by 'sibling' rootMode to pin
+  // the synthetic root row at index 0.
+  pinnedId?: string | null
   onRename: (id: string, label: string) => void
   onToggle: (id: string, included: boolean) => void
   onReorder: (parentId: string | null, from: number, to: number) => void
 }
 
-function EditableTree({ nodes, parentId, onRename, onToggle, onReorder }: EditableTreeProps) {
+function EditableTree({ nodes, parentId, pinnedId = null, onRename, onToggle, onReorder }: EditableTreeProps) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -412,6 +594,7 @@ function EditableTree({ nodes, parentId, onRename, onToggle, onReorder }: Editab
   const handleDragEnd = (e: DragEndEvent) => {
     const { active, over } = e
     if (!over || active.id === over.id) return
+    if (pinnedId && (active.id === pinnedId || over.id === pinnedId)) return
     const from = nodes.findIndex(n => n.id === active.id)
     const to = nodes.findIndex(n => n.id === over.id)
     if (from === -1 || to === -1) return
@@ -428,6 +611,7 @@ function EditableTree({ nodes, parentId, onRename, onToggle, onReorder }: Editab
             <SortableEditableRow
               key={node.id}
               node={node}
+              pinned={pinnedId === node.id}
               onRename={onRename}
               onToggle={onToggle}
               onReorder={onReorder}
@@ -441,12 +625,13 @@ function EditableTree({ nodes, parentId, onRename, onToggle, onReorder }: Editab
 
 interface SortableEditableRowProps {
   node: SitemapNode
+  pinned?: boolean
   onRename: (id: string, label: string) => void
   onToggle: (id: string, included: boolean) => void
   onReorder: (parentId: string | null, from: number, to: number) => void
 }
 
-function SortableEditableRow({ node, onRename, onToggle, onReorder }: SortableEditableRowProps) {
+function SortableEditableRow({ node, pinned = false, onRename, onToggle, onReorder }: SortableEditableRowProps) {
   const {
     attributes,
     listeners,
@@ -454,7 +639,7 @@ function SortableEditableRow({ node, onRename, onToggle, onReorder }: SortableEd
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: node.id })
+  } = useSortable({ id: node.id, disabled: pinned })
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -466,11 +651,12 @@ function SortableEditableRow({ node, onRename, onToggle, onReorder }: SortableEd
     <li ref={setNodeRef} style={style}>
       <div className={`flex items-center gap-2 px-2 py-1 rounded border ${node.included ? 'border-gray-200 bg-white' : 'border-gray-200 bg-gray-50 opacity-60'}`}>
         <button
-          {...attributes}
-          {...listeners}
-          aria-label="Drag to reorder"
-          className="cursor-grab active:cursor-grabbing text-gray-400 hover:text-gray-600 px-1"
+          {...(pinned ? {} : attributes)}
+          {...(pinned ? {} : listeners)}
+          aria-label={pinned ? 'Pinned (root)' : 'Drag to reorder'}
+          className={`px-1 ${pinned ? 'cursor-not-allowed text-gray-300' : 'cursor-grab active:cursor-grabbing text-gray-400 hover:text-gray-600'}`}
           type="button"
+          disabled={pinned}
         >
           ⋮⋮
         </button>
