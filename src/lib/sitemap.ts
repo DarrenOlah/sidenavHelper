@@ -1,0 +1,374 @@
+// Pure helpers for the sidenav helper:
+//   - parse pasted clipboard HTML into a SitemapNode[] forest
+//   - mutate that forest immutably (rename, include, reorder, pick subtree)
+//   - emit a paste-ready <nav class="au-sidenav"> block matching the markup
+//     authored in the au-sidenav component.
+//
+// Kept free of React so they can be unit-tested with literal HTML strings.
+
+export interface SitemapNode {
+  id: string
+  href: string
+  defaultLabel: string
+  label: string
+  included: boolean
+  children: SitemapNode[]
+}
+
+export interface ParseResult {
+  forest: SitemapNode[]
+  pageCount: number
+  maxDepth: number
+}
+
+// ── Parsing ─────────────────────────────────────────────────────────────────
+
+let __idCounter = 0
+function nextId(): string {
+  __idCounter += 1
+  return 'n' + __idCounter
+}
+
+// Reset between top-level parses so test runs are deterministic.
+function resetIds(): void {
+  __idCounter = 0
+}
+
+// Parse clipboard HTML → forest of SitemapNodes. The input is whatever lands in
+// `clipboardData.getData('text/html')` when the user copies a styled <ul>
+// site-index. Strategy: parse with DOMParser, find every <a href> inside any
+// <ul>, group them by their nearest enclosing <ul>, recurse.
+export function parseSitemapHtml(html: string): ParseResult {
+  resetIds()
+
+  if (!html || !html.trim()) {
+    return { forest: [], pageCount: 0, maxDepth: 0 }
+  }
+
+  const doc = new DOMParser().parseFromString(html, 'text/html')
+  const baseHref = doc.querySelector('base')?.getAttribute('href') ?? undefined
+
+  // Find candidate top-level <ul> elements: every <ul> that is NOT contained
+  // inside another <ul>. This covers both "selection includes the wrapper"
+  // and "selection is a series of sibling <ul>s" cases.
+  const allLists = Array.from(doc.querySelectorAll('ul'))
+  const topLists = allLists.filter(ul => !ul.parentElement?.closest('ul'))
+
+  // If there are no <ul>s but we still have <a>s (e.g. pasted as a flat
+  // anchor list), fall back to a flat forest of leaf links.
+  if (topLists.length === 0) {
+    const links = Array.from(doc.querySelectorAll('a[href]'))
+    const forest = links
+      .map(a => buildLeaf(a as HTMLAnchorElement, baseHref))
+      .filter((n): n is SitemapNode => n !== null)
+    return summarize(forest)
+  }
+
+  const forest: SitemapNode[] = []
+  for (const ul of topLists) {
+    forest.push(...listToNodes(ul, baseHref))
+  }
+  return summarize(forest)
+}
+
+function listToNodes(ul: Element, baseHref: string | undefined): SitemapNode[] {
+  const items: SitemapNode[] = []
+  // Direct child <li>s only — recursion handles nested <ul>s.
+  for (const li of Array.from(ul.children)) {
+    if (li.tagName.toLowerCase() !== 'li') continue
+    const node = liToNode(li, baseHref)
+    if (node) items.push(node)
+  }
+  return items
+}
+
+function liToNode(li: Element, baseHref: string | undefined): SitemapNode | null {
+  // The first <a href> inside this <li> that is NOT inside a nested <ul>
+  // is the item's own link. Anything inside a child <ul> belongs to children.
+  const ownAnchor = findOwnAnchor(li)
+
+  // Children come from the first nested <ul> directly inside this <li>.
+  const childUl = Array.from(li.children).find(c => c.tagName.toLowerCase() === 'ul')
+  const children = childUl ? listToNodes(childUl, baseHref) : []
+
+  if (!ownAnchor) {
+    // No anchor on this row, but children present — collapse children into
+    // the parent's level rather than dropping them. (Common in markup that
+    // uses a plain text label as a header above a nested list.)
+    if (children.length > 0) {
+      // Promote children — caller will still get them via the wrapping list.
+      // We represent the headerless row as a no-href node so the user can
+      // either rename + include, or exclude it entirely.
+      const label = (firstTextLabel(li) || '(no label)').trim()
+      return {
+        id: nextId(),
+        href: '',
+        defaultLabel: label,
+        label,
+        included: true,
+        children,
+      }
+    }
+    return null
+  }
+
+  const label = (ownAnchor.textContent || '').replace(/\s+/g, ' ').trim()
+  const href = resolveHref(ownAnchor.getAttribute('href') || '', baseHref)
+
+  return {
+    id: nextId(),
+    href,
+    defaultLabel: label || href || '(no label)',
+    label: label || href || '(no label)',
+    included: true,
+    children,
+  }
+}
+
+function findOwnAnchor(li: Element): HTMLAnchorElement | null {
+  // Scan direct children only, in document order. Stop at the first nested <ul>
+  // — anything past that belongs to children, not to this row.
+  for (const child of Array.from(li.children)) {
+    const tag = child.tagName.toLowerCase()
+    if (tag === 'ul') return null
+    if (tag === 'a' && child.hasAttribute('href')) return child as HTMLAnchorElement
+    // The anchor is often wrapped in a <span>, <strong>, etc. Search inside,
+    // but skip anything containing a nested <ul> (that descendant anchor would
+    // belong to a child row).
+    if ((child as HTMLElement).querySelector?.(':scope ul')) continue
+    const nested = (child as HTMLElement).querySelector?.('a[href]')
+    if (nested) return nested as HTMLAnchorElement
+  }
+  return null
+}
+
+function firstTextLabel(li: Element): string {
+  for (const node of Array.from(li.childNodes)) {
+    if (node.nodeType === 3) {
+      const t = (node.textContent || '').trim()
+      if (t) return t
+    }
+    if (node.nodeType === 1) {
+      const el = node as Element
+      if (el.tagName.toLowerCase() === 'ul') break
+      const t = (el.textContent || '').trim()
+      if (t) return t
+    }
+  }
+  return ''
+}
+
+function buildLeaf(a: HTMLAnchorElement, baseHref: string | undefined): SitemapNode | null {
+  const label = (a.textContent || '').replace(/\s+/g, ' ').trim()
+  const href = resolveHref(a.getAttribute('href') || '', baseHref)
+  if (!href && !label) return null
+  return {
+    id: nextId(),
+    href,
+    defaultLabel: label || href,
+    label: label || href,
+    included: true,
+    children: [],
+  }
+}
+
+// Reject schemes that can execute code or read local files when navigated to.
+// data: is included because data:text/html can carry inline scripts; even though
+// modern browsers block top-level navigation to data:text/html from regular
+// links, the helper renders the preview inline and we don't want such hrefs in
+// the copied output either.
+const REJECTED_SCHEMES = ['javascript:', 'data:', 'vbscript:', 'file:']
+
+function resolveHref(raw: string, baseHref: string | undefined): string {
+  if (!raw) return ''
+  const lower = raw.trim().toLowerCase()
+  if (lower.startsWith('#')) return ''
+  if (REJECTED_SCHEMES.some(s => lower.startsWith(s))) return ''
+  try {
+    const resolved = baseHref ? new URL(raw, baseHref) : new URL(raw)
+    // Re-check after resolution in case the base introduced a rejected scheme.
+    if (REJECTED_SCHEMES.some(s => resolved.protocol === s)) return ''
+    return resolved.href
+  } catch {
+    return raw.trim()
+  }
+}
+
+function summarize(forest: SitemapNode[]): ParseResult {
+  let pageCount = 0
+  let maxDepth = 0
+  function walk(nodes: SitemapNode[], depth: number): void {
+    if (nodes.length > 0 && depth > maxDepth) maxDepth = depth
+    for (const n of nodes) {
+      pageCount += 1
+      walk(n.children, depth + 1)
+    }
+  }
+  walk(forest, 1)
+  return { forest, pageCount, maxDepth }
+}
+
+// ── Tree mutations (immutable) ──────────────────────────────────────────────
+
+export function findNode(roots: SitemapNode[], id: string): SitemapNode | null {
+  for (const n of roots) {
+    if (n.id === id) return n
+    const child = findNode(n.children, id)
+    if (child) return child
+  }
+  return null
+}
+
+export function findParent(roots: SitemapNode[], id: string): SitemapNode | null {
+  for (const n of roots) {
+    if (n.children.some(c => c.id === id)) return n
+    const deeper = findParent(n.children, id)
+    if (deeper) return deeper
+  }
+  return null
+}
+
+function mapTree(roots: SitemapNode[], fn: (n: SitemapNode) => SitemapNode): SitemapNode[] {
+  return roots.map(n => {
+    const next = fn(n)
+    return { ...next, children: mapTree(next.children, fn) }
+  })
+}
+
+export function renameNode(roots: SitemapNode[], id: string, label: string): SitemapNode[] {
+  return mapTree(roots, n => n.id === id ? { ...n, label } : n)
+}
+
+export function setIncluded(roots: SitemapNode[], id: string, included: boolean): SitemapNode[] {
+  // Toggling a node also cascades to descendants — excluding a parent
+  // shouldn't leave orphaned children "included" in the output, and re-
+  // including a parent restores its subtree.
+  return mapTree(roots, n => {
+    if (n.id === id) return cascadeIncluded(n, included)
+    return n
+  })
+}
+
+function cascadeIncluded(node: SitemapNode, included: boolean): SitemapNode {
+  return {
+    ...node,
+    included,
+    children: node.children.map(c => cascadeIncluded(c, included)),
+  }
+}
+
+// Reorder siblings under `parentId`. Pass `null` to reorder the top-level forest.
+export function reorderSiblings(
+  roots: SitemapNode[],
+  parentId: string | null,
+  fromIndex: number,
+  toIndex: number,
+): SitemapNode[] {
+  if (parentId === null) {
+    return reorderArray(roots, fromIndex, toIndex)
+  }
+  return mapTree(roots, n =>
+    n.id === parentId
+      ? { ...n, children: reorderArray(n.children, fromIndex, toIndex) }
+      : n,
+  )
+}
+
+function reorderArray<T>(arr: T[], from: number, to: number): T[] {
+  if (from === to || from < 0 || from >= arr.length) return arr
+  const next = arr.slice()
+  const [item] = next.splice(from, 1)
+  next.splice(Math.max(0, Math.min(to, next.length)), 0, item)
+  return next
+}
+
+// Returns the subtree rooted at `id` as a one-element forest (so the caller
+// can treat the result as the "active forest" the same way as the full one).
+// If `id` doesn't match anything, returns the original forest unchanged.
+export function selectSubtree(roots: SitemapNode[], id: string): SitemapNode[] {
+  const node = findNode(roots, id)
+  return node ? [node] : roots
+}
+
+// ── Output ──────────────────────────────────────────────────────────────────
+
+export interface GenerateOptions {
+  headerText?: string
+}
+
+// Emit a <nav class="au-sidenav"> block matching the markup format authored
+// in the au-sidenav component (vendored under src/vendor/au-sidenav/).
+//
+// Rules:
+//   - Skip nodes (and descendants) whose `included === false`.
+//   - A parent (with at least one included child) gets the chevron <button>
+//     and a <ul class="au-sidenav__sublist">.
+//   - A leaf is just <li class="au-sidenav__item"><a href="...">Label</a></li>.
+//   - Indentation matches the example file (2 spaces per level).
+export function generateSidenavHtml(
+  roots: SitemapNode[],
+  options: GenerateOptions = {},
+): string {
+  const headerText = options.headerText?.trim() || 'In this section'
+  const header = escapeHtml(headerText)
+
+  const itemsHtml = roots
+    .filter(n => n.included)
+    .map(n => renderItem(n, 2))
+    .join('\n\n')
+
+  const inner = itemsHtml ? '\n\n' + itemsHtml + '\n\n  ' : '\n  '
+
+  return `<nav class="au-sidenav" aria-label="${header}">
+  <h3 class="au-sidenav__header">${header}</h3>
+  <ul class="au-sidenav__list">${inner}</ul>
+</nav>`
+}
+
+function renderItem(node: SitemapNode, indent: number): string {
+  const pad = ' '.repeat(indent)
+  const label = escapeHtml(node.label || node.defaultLabel || '')
+  const href = escapeAttr(safeHref(node.href))
+
+  const includedChildren = node.children.filter(c => c.included)
+
+  if (includedChildren.length === 0) {
+    return `${pad}<li class="au-sidenav__item">\n${pad}  <a href="${href}">${label}</a>\n${pad}</li>`
+  }
+
+  const childrenHtml = includedChildren
+    .map(c => renderItem(c, indent + 4))
+    .join('\n')
+
+  return [
+    `${pad}<li class="au-sidenav__item">`,
+    `${pad}  <a href="${href}">${label}</a>`,
+    `${pad}  <button type="button" class="au-sidenav__toggle" aria-label="Toggle submenu"></button>`,
+    `${pad}  <ul class="au-sidenav__sublist">`,
+    childrenHtml,
+    `${pad}  </ul>`,
+    `${pad}</li>`,
+  ].join('\n')
+}
+
+// Defense-in-depth: even though resolveHref strips dangerous schemes during
+// parsing, callers can construct SitemapNodes directly (e.g. in tests or
+// future codepaths). Re-check at render time so dangerouslySetInnerHTML
+// never receives a navigatable javascript:/data:/vbscript:/file: href.
+function safeHref(href: string): string {
+  if (!href) return '#'
+  const lower = href.trim().toLowerCase()
+  if (REJECTED_SCHEMES.some(s => lower.startsWith(s))) return '#'
+  return href
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
+function escapeAttr(s: string): string {
+  return escapeHtml(s).replace(/"/g, '&quot;')
+}
