@@ -1,4 +1,7 @@
 import { useState, useMemo, useRef, useEffect, type ChangeEvent, type ClipboardEvent as RClipboardEvent } from 'react'
+
+const HELPER_URL = 'https://darrenolah.github.io/sidenavHelper/'
+const REPO_URL = 'https://github.com/DarrenOlah/sidenavHelper'
 import {
   DndContext,
   PointerSensor,
@@ -43,6 +46,10 @@ import {
   reorderSiblings,
   selectSubtree,
   findNode,
+  makeNode,
+  addChild,
+  removeNode,
+  setHref,
   type SitemapNode,
   type RootMode,
   type HrefMode,
@@ -61,6 +68,9 @@ interface State {
   pageCount: number
   maxDepth: number
   parseError: string
+  // Ids of nodes the user added (vs. parsed from the pasted sitemap). Drives
+  // delete-button visibility and auto-opens the URL editor on those rows.
+  addedIds: Set<string>
 }
 
 const INITIAL_STATE: State = {
@@ -74,6 +84,29 @@ const INITIAL_STATE: State = {
   pageCount: 0,
   maxDepth: 0,
   parseError: '',
+  addedIds: new Set(),
+}
+
+// ── Asset download (panel 4) ─────────────────────────────────────────────────
+
+// Trigger a browser download of `content` as `filename`. Stamps a header
+// comment with the helper version + URL so a recipient can trace where the
+// file came from. The /* … */ form is valid in both CSS and JS.
+function downloadAsset(filename: string, content: string, mimeType: string) {
+  const stamped =
+    `/* ${filename} — bundled with sidenavHelper v${__APP_VERSION__}\n` +
+    `   ${HELPER_URL}\n` +
+    `   This is a vendored copy of the au-sidenav asset. */\n\n` +
+    content
+  const blob = new Blob([stamped], { type: mimeType })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
 }
 
 // ── Section label (mirrors heroHelper) ───────────────────────────────────────
@@ -103,7 +136,7 @@ export default function App() {
   const [copied, setCopied] = useState(false)
   const pasteRef = useRef<HTMLDivElement | null>(null)
 
-  const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, pageCount, maxDepth, parseError } = state
+  const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, pageCount, maxDepth, parseError, addedIds } = state
 
   const hasForest = forest.length > 0
   const hasPickedRoot = rootId !== null && findNode(forest, rootId) !== null
@@ -123,7 +156,12 @@ export default function App() {
 
   const generatedHtml = useMemo(
     () => hasForest
-      ? generateSidenavHtml(activeForest, { headerText, rootMode: hasPickedRoot ? rootMode : 'parent', hrefMode })
+      ? generateSidenavHtml(activeForest, {
+          headerText,
+          rootMode: hasPickedRoot ? rootMode : 'parent',
+          hrefMode,
+          helperVersion: __APP_VERSION__,
+        })
       : '',
     [hasForest, activeForest, headerText, rootMode, hrefMode, hasPickedRoot],
   )
@@ -234,6 +272,41 @@ export default function App() {
       }
       return { ...s, forest: reorderSiblings(s.forest, parentId, fromIndex, toIndex) }
     })
+
+  // Adds a child under the named parent. The new id is recorded in addedIds
+  // so the row gets a delete button and an auto-opened URL editor.
+  const handleAddChild = (parentId: string) =>
+    setState(s => {
+      const node = makeNode()
+      const nextAdded = new Set(s.addedIds)
+      nextAdded.add(node.id)
+      return { ...s, forest: addChild(s.forest, parentId, node), addedIds: nextAdded }
+    })
+
+  // Adds a sibling at the level identified by parentId. The 'sibling' rootMode
+  // shows the picked root pinned at index 0 of the displayed top level, with
+  // the root's actual children below it — so a top-level "+ Add page" in that
+  // mode must append to the underlying root's children, not to the forest.
+  const handleAddSibling = (parentId: string | null) =>
+    setState(s => {
+      const node = makeNode()
+      const nextAdded = new Set(s.addedIds)
+      nextAdded.add(node.id)
+      if (parentId === null && s.rootMode === 'sibling' && s.rootId) {
+        return { ...s, forest: addChild(s.forest, s.rootId, node), addedIds: nextAdded }
+      }
+      return { ...s, forest: addChild(s.forest, parentId, node), addedIds: nextAdded }
+    })
+
+  const handleDelete = (id: string) =>
+    setState(s => {
+      const nextAdded = new Set(s.addedIds)
+      nextAdded.delete(id)
+      return { ...s, forest: removeNode(s.forest, id), addedIds: nextAdded }
+    })
+
+  const handleSetHref = (id: string, href: string) =>
+    setState(s => ({ ...s, forest: setHref(s.forest, id, href) }))
 
   const handleHeaderText = (val: string) =>
     setState(s => ({ ...s, headerText: val }))
@@ -416,9 +489,14 @@ export default function App() {
                   nodes={displayedForest}
                   parentId={null}
                   pinnedId={hasPickedRoot && rootMode === 'sibling' ? rootId : null}
+                  addedIds={addedIds}
                   onRename={handleRename}
                   onToggle={handleToggleInclude}
                   onReorder={handleReorder}
+                  onAddChild={handleAddChild}
+                  onAddSibling={handleAddSibling}
+                  onDelete={handleDelete}
+                  onSetHref={handleSetHref}
                 />
               </div>
             </div>
@@ -462,6 +540,15 @@ export default function App() {
                         <span className="block text-[11px] text-gray-500">
                           Useful when you can't reference <code className="font-mono">sidenav.css</code> from the page skin.
                         </span>
+                        {!includeCss && (
+                          <button
+                            type="button"
+                            onClick={e => { e.preventDefault(); downloadAsset('sidenav.css', sidenavCss, 'text/css') }}
+                            className="mt-1 text-[11px] text-blue-600 hover:text-blue-800 underline"
+                          >
+                            Download sidenav.css
+                          </button>
+                        )}
                       </span>
                     </label>
                     <label className="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
@@ -476,6 +563,15 @@ export default function App() {
                         <span className="block text-[11px] text-gray-500">
                           Useful when you can't reference <code className="font-mono">sidenav.js</code> from the page skin.
                         </span>
+                        {!includeJs && (
+                          <button
+                            type="button"
+                            onClick={e => { e.preventDefault(); downloadAsset('sidenav.js', sidenavJs, 'text/javascript') }}
+                            className="mt-1 text-[11px] text-blue-600 hover:text-blue-800 underline"
+                          >
+                            Download sidenav.js
+                          </button>
+                        )}
                       </span>
                     </label>
                   </fieldset>
@@ -516,7 +612,7 @@ export default function App() {
       <footer className="px-2 py-1 bg-white flex-shrink-0 flex justify-center sm:justify-end">
         <span className="text-[10px] text-gray-400 leading-none">
           Sidenav Helper v{__APP_VERSION__} •{' '}
-          <a className="underline hover:text-blue-500" href="https://github.com/" target="_blank" rel="noreferrer">View on GitHub</a>
+          <a className="underline hover:text-blue-500" href={REPO_URL} target="_blank" rel="noreferrer">View on GitHub</a>
         </span>
       </footer>
     </div>
@@ -580,12 +676,29 @@ interface EditableTreeProps {
   // handle and is excluded from reorders. Used by 'sibling' rootMode to pin
   // the synthetic root row at index 0.
   pinnedId?: string | null
+  addedIds: Set<string>
   onRename: (id: string, label: string) => void
   onToggle: (id: string, included: boolean) => void
   onReorder: (parentId: string | null, from: number, to: number) => void
+  onAddChild: (parentId: string) => void
+  onAddSibling: (parentId: string | null) => void
+  onDelete: (id: string) => void
+  onSetHref: (id: string, href: string) => void
 }
 
-function EditableTree({ nodes, parentId, pinnedId = null, onRename, onToggle, onReorder }: EditableTreeProps) {
+function EditableTree({
+  nodes,
+  parentId,
+  pinnedId = null,
+  addedIds,
+  onRename,
+  onToggle,
+  onReorder,
+  onAddChild,
+  onAddSibling,
+  onDelete,
+  onSetHref,
+}: EditableTreeProps) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -601,8 +714,6 @@ function EditableTree({ nodes, parentId, pinnedId = null, onRename, onToggle, on
     onReorder(parentId, from, to)
   }
 
-  if (nodes.length === 0) return null
-
   return (
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
       <SortableContext items={nodes.map(n => n.id)} strategy={verticalListSortingStrategy}>
@@ -612,11 +723,26 @@ function EditableTree({ nodes, parentId, pinnedId = null, onRename, onToggle, on
               key={node.id}
               node={node}
               pinned={pinnedId === node.id}
+              isAdded={addedIds.has(node.id)}
+              addedIds={addedIds}
               onRename={onRename}
               onToggle={onToggle}
               onReorder={onReorder}
+              onAddChild={onAddChild}
+              onAddSibling={onAddSibling}
+              onDelete={onDelete}
+              onSetHref={onSetHref}
             />
           ))}
+          <li>
+            <button
+              type="button"
+              onClick={() => onAddSibling(parentId)}
+              className="w-full text-left px-2 py-1 rounded border border-dashed border-gray-300 text-[11px] text-gray-500 hover:text-blue-700 hover:border-blue-400 hover:bg-blue-50/40 transition-colors"
+            >
+              + Add sibling page
+            </button>
+          </li>
         </ul>
       </SortableContext>
     </DndContext>
@@ -626,12 +752,30 @@ function EditableTree({ nodes, parentId, pinnedId = null, onRename, onToggle, on
 interface SortableEditableRowProps {
   node: SitemapNode
   pinned?: boolean
+  isAdded: boolean
+  addedIds: Set<string>
   onRename: (id: string, label: string) => void
   onToggle: (id: string, included: boolean) => void
   onReorder: (parentId: string | null, from: number, to: number) => void
+  onAddChild: (parentId: string) => void
+  onAddSibling: (parentId: string | null) => void
+  onDelete: (id: string) => void
+  onSetHref: (id: string, href: string) => void
 }
 
-function SortableEditableRow({ node, pinned = false, onRename, onToggle, onReorder }: SortableEditableRowProps) {
+function SortableEditableRow({
+  node,
+  pinned = false,
+  isAdded,
+  addedIds,
+  onRename,
+  onToggle,
+  onReorder,
+  onAddChild,
+  onAddSibling,
+  onDelete,
+  onSetHref,
+}: SortableEditableRowProps) {
   const {
     attributes,
     listeners,
@@ -640,6 +784,10 @@ function SortableEditableRow({ node, pinned = false, onRename, onToggle, onReord
     transition,
     isDragging,
   } = useSortable({ id: node.id, disabled: pinned })
+
+  // Newly-added rows always need a URL — open the editor by default for those.
+  // Existing rows keep it collapsed; the user clicks "URL" to reveal it.
+  const [urlOpen, setUrlOpen] = useState(isAdded)
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -674,15 +822,61 @@ function SortableEditableRow({ node, pinned = false, onRename, onToggle, onReord
           onChange={e => onRename(node.id, e.target.value)}
           className="flex-1 min-w-0 px-2 py-0.5 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
         />
+        <button
+          type="button"
+          onClick={() => setUrlOpen(o => !o)}
+          aria-expanded={urlOpen}
+          title={urlOpen ? 'Hide URL' : 'Edit URL'}
+          className={`shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded border ${urlOpen ? 'bg-blue-50 border-blue-300 text-blue-700' : 'border-gray-200 text-gray-500 hover:text-blue-700 hover:border-blue-300'}`}
+        >
+          URL
+        </button>
+        <button
+          type="button"
+          onClick={() => onAddChild(node.id)}
+          aria-label="Add child page"
+          title="Add child page"
+          className="shrink-0 px-1.5 py-0.5 text-xs rounded border border-gray-200 text-gray-500 hover:text-green-700 hover:border-green-300"
+        >
+          +
+        </button>
+        {isAdded && (
+          <button
+            type="button"
+            onClick={() => onDelete(node.id)}
+            aria-label="Delete page"
+            title="Delete page"
+            className="shrink-0 px-1.5 py-0.5 text-xs rounded border border-gray-200 text-gray-500 hover:text-red-700 hover:border-red-300"
+          >
+            ×
+          </button>
+        )}
       </div>
+      {urlOpen && (
+        <div className="ml-6 mt-1 flex items-center gap-2">
+          <span className="text-[10px] font-mono text-gray-400 shrink-0">URL</span>
+          <input
+            type="text"
+            value={node.href}
+            placeholder="path/to/page"
+            onChange={e => onSetHref(node.id, e.target.value)}
+            className="flex-1 min-w-0 px-2 py-0.5 text-xs font-mono border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+        </div>
+      )}
       {node.children.length > 0 && (
         <div className="ml-6 mt-1">
           <EditableTree
             nodes={node.children}
             parentId={node.id}
+            addedIds={addedIds}
             onRename={onRename}
             onToggle={onToggle}
             onReorder={onReorder}
+            onAddChild={onAddChild}
+            onAddSibling={onAddSibling}
+            onDelete={onDelete}
+            onSetHref={onSetHref}
           />
         </div>
       )}

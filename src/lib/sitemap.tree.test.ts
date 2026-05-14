@@ -6,6 +6,11 @@ import {
   setIncluded,
   reorderSiblings,
   selectSubtree,
+  addChild,
+  addSiblingAfter,
+  removeNode,
+  setHref,
+  makeNode,
   type SitemapNode,
 } from './sitemap'
 
@@ -136,5 +141,133 @@ describe('selectSubtree', () => {
   it('returns the original forest when id is unknown', () => {
     const forest = buildSampleForest()
     expect(selectSubtree(forest, 'nope')).toBe(forest)
+  })
+})
+
+describe('makeNode', () => {
+  it('creates a node with a generated id and the given label/href', () => {
+    const n = makeNode('Hello', '/hi/')
+    expect(n.id).toMatch(/^n\d+$/)
+    expect(n.label).toBe('Hello')
+    expect(n.defaultLabel).toBe('Hello')
+    expect(n.href).toBe('/hi/')
+    expect(n.included).toBe(true)
+    expect(n.children).toEqual([])
+  })
+
+  it('uses sensible defaults', () => {
+    const n = makeNode()
+    expect(n.label).toBe('New page')
+    expect(n.href).toBe('')
+  })
+})
+
+describe('addChild', () => {
+  it('appends to the top level when parentId is null', () => {
+    const forest = buildSampleForest()
+    const node = leaf('new', 'New')
+    const next = addChild(forest, null, node)
+    expect(next.map(n => n.id)).toEqual(['a', 'b', 'c', 'new'])
+  })
+
+  it('appends to a named parent', () => {
+    const forest = buildSampleForest()
+    const node = leaf('new', 'New')
+    const next = addChild(forest, 'a', node)
+    expect(findNode(next, 'a')?.children.map(c => c.id)).toEqual(['a1', 'a2', 'new'])
+  })
+
+  it('appends to a deeply nested parent', () => {
+    const forest = buildSampleForest()
+    const node = leaf('new', 'New')
+    const next = addChild(forest, 'a2', node)
+    expect(findNode(next, 'a2')?.children.map(c => c.id)).toEqual(['a2a', 'new'])
+  })
+
+  it('does not mutate the input forest', () => {
+    const forest = buildSampleForest()
+    const original = JSON.stringify(forest)
+    addChild(forest, 'a', leaf('new', 'New'))
+    expect(JSON.stringify(forest)).toBe(original)
+  })
+})
+
+describe('addSiblingAfter', () => {
+  it('inserts after a top-level sibling', () => {
+    const forest = buildSampleForest()
+    const next = addSiblingAfter(forest, 'b', leaf('new', 'New'))
+    expect(next.map(n => n.id)).toEqual(['a', 'b', 'new', 'c'])
+  })
+
+  it('inserts after a nested sibling', () => {
+    const forest = buildSampleForest()
+    const next = addSiblingAfter(forest, 'a1', leaf('new', 'New'))
+    expect(findNode(next, 'a')?.children.map(c => c.id)).toEqual(['a1', 'new', 'a2'])
+  })
+
+  it('does not mutate the input forest', () => {
+    const forest = buildSampleForest()
+    const original = JSON.stringify(forest)
+    addSiblingAfter(forest, 'a1', leaf('new', 'New'))
+    expect(JSON.stringify(forest)).toBe(original)
+  })
+})
+
+describe('removeNode', () => {
+  it('removes a top-level leaf', () => {
+    const forest = buildSampleForest()
+    const next = removeNode(forest, 'b')
+    expect(next.map(n => n.id)).toEqual(['a', 'c'])
+  })
+
+  it('removes a nested leaf', () => {
+    const forest = buildSampleForest()
+    const next = removeNode(forest, 'a1')
+    expect(findNode(next, 'a')?.children.map(c => c.id)).toEqual(['a2'])
+    expect(findNode(next, 'a1')).toBeNull()
+  })
+
+  it('removes an internal node along with its subtree', () => {
+    const forest = buildSampleForest()
+    const next = removeNode(forest, 'a2')
+    expect(findNode(next, 'a2')).toBeNull()
+    expect(findNode(next, 'a2a')).toBeNull()
+    expect(findNode(next, 'a')?.children.map(c => c.id)).toEqual(['a1'])
+  })
+
+  it('returns an unchanged forest for unknown ids', () => {
+    const forest = buildSampleForest()
+    const next = removeNode(forest, 'nope')
+    expect(next.map(n => n.id)).toEqual(forest.map(n => n.id))
+  })
+
+  it('does not mutate the input forest', () => {
+    const forest = buildSampleForest()
+    const original = JSON.stringify(forest)
+    removeNode(forest, 'a2')
+    expect(JSON.stringify(forest)).toBe(original)
+  })
+})
+
+describe('setHref', () => {
+  it('updates href on the named node only', () => {
+    const forest = buildSampleForest()
+    const next = setHref(forest, 'a1', '/new/')
+    expect(findNode(next, 'a1')?.href).toBe('/new/')
+    expect(findNode(next, 'a2')?.href).toBe('/a2')
+    expect(findNode(next, 'b')?.href).toBe('/b')
+  })
+
+  it('updates href on a deeply nested node', () => {
+    const forest = buildSampleForest()
+    const next = setHref(forest, 'a2a', '/deep/')
+    expect(findNode(next, 'a2a')?.href).toBe('/deep/')
+  })
+
+  it('does not mutate the input forest', () => {
+    const forest = buildSampleForest()
+    const original = JSON.stringify(forest)
+    setHref(forest, 'a1', '/new/')
+    expect(JSON.stringify(forest)).toBe(original)
   })
 })
