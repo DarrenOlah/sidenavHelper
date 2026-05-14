@@ -252,6 +252,25 @@ describe('generateSidenavHtml', () => {
       const html = generateSidenavHtml([leaf('1', 'A', '/foo/bar')])
       expect(html).toContain('href="/foo/bar"')
     })
+
+    it('keeps the host on a node flagged external, even in site-root-relative mode', () => {
+      const node: SitemapNode = {
+        id: '1', href: 'https://other.example.com/docs', defaultLabel: 'Docs', label: 'Docs',
+        included: true, children: [], external: true,
+      }
+      const html = generateSidenavHtml([node])
+      expect(html).toContain('href="https://other.example.com/docs"')
+    })
+
+    it('still strips host on a node not flagged external', () => {
+      const node: SitemapNode = {
+        id: '1', href: 'https://other.example.com/docs', defaultLabel: 'Docs', label: 'Docs',
+        included: true, children: [], external: false,
+      }
+      const html = generateSidenavHtml([node])
+      expect(html).toContain('href="/docs"')
+      expect(html).not.toContain('other.example.com')
+    })
   })
 
   it('produces output that round-trips through parseSitemapHtml with the same structure', () => {

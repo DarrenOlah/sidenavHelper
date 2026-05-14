@@ -13,6 +13,10 @@ export interface SitemapNode {
   label: string
   included: boolean
   children: SitemapNode[]
+  // When true, render the href verbatim (full URL with host) regardless of
+  // the global hrefMode. Used to keep external links — to systems on a
+  // different host — from being mangled into broken site-root-relative paths.
+  external?: boolean
 }
 
 export interface ParseResult {
@@ -335,6 +339,12 @@ export function setHref(roots: SitemapNode[], id: string, href: string): Sitemap
   return mapTree(roots, n => n.id === id ? { ...n, href } : n)
 }
 
+// Mark a node's href as external — its host will not be stripped even when
+// the global hrefMode is 'site-root-relative'.
+export function setExternal(roots: SitemapNode[], id: string, external: boolean): SitemapNode[] {
+  return mapTree(roots, n => n.id === id ? { ...n, external } : n)
+}
+
 // ── Output ──────────────────────────────────────────────────────────────────
 
 export type RootMode = 'parent' | 'parent-expanded' | 'hide' | 'sibling'
@@ -419,7 +429,9 @@ function renderItem(
 ): string {
   const pad = ' '.repeat(indent)
   const label = escapeHtml(node.label || node.defaultLabel || '')
-  const href = escapeAttr(safeHref(transformHref(node.href, hrefMode)))
+  // External links keep their host even when the global mode would strip it.
+  const effectiveMode: HrefMode = node.external ? 'absolute' : hrefMode
+  const href = escapeAttr(safeHref(transformHref(node.href, effectiveMode)))
 
   const includedChildren = node.children.filter(c => c.included)
 

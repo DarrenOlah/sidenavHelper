@@ -10,6 +10,7 @@ import {
   addSiblingAfter,
   removeNode,
   setHref,
+  setExternal,
   makeNode,
   type SitemapNode,
 } from './sitemap'
@@ -268,6 +269,28 @@ describe('setHref', () => {
     const forest = buildSampleForest()
     const original = JSON.stringify(forest)
     setHref(forest, 'a1', '/new/')
+    expect(JSON.stringify(forest)).toBe(original)
+  })
+})
+
+describe('setExternal', () => {
+  it('marks a node as external', () => {
+    const forest = buildSampleForest()
+    const next = setExternal(forest, 'a1', true)
+    expect(findNode(next, 'a1')?.external).toBe(true)
+    expect(findNode(next, 'a2')?.external).toBeUndefined()
+  })
+
+  it('clears the external flag', () => {
+    let forest = setExternal(buildSampleForest(), 'a1', true)
+    forest = setExternal(forest, 'a1', false)
+    expect(findNode(forest, 'a1')?.external).toBe(false)
+  })
+
+  it('does not mutate the input forest', () => {
+    const forest = buildSampleForest()
+    const original = JSON.stringify(forest)
+    setExternal(forest, 'a1', true)
     expect(JSON.stringify(forest)).toBe(original)
   })
 })

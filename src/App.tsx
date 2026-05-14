@@ -50,6 +50,7 @@ import {
   addChild,
   removeNode,
   setHref,
+  setExternal,
   type SitemapNode,
   type RootMode,
   type HrefMode,
@@ -310,6 +311,9 @@ export default function App() {
   const handleSetHref = (id: string, href: string) =>
     setState(s => ({ ...s, forest: setHref(s.forest, id, href) }))
 
+  const handleSetExternal = (id: string, external: boolean) =>
+    setState(s => ({ ...s, forest: setExternal(s.forest, id, external) }))
+
   const handleHeaderText = (val: string) =>
     setState(s => ({ ...s, headerText: val }))
 
@@ -499,6 +503,7 @@ export default function App() {
                   onAddSibling={handleAddSibling}
                   onDelete={handleDelete}
                   onSetHref={handleSetHref}
+                  onSetExternal={handleSetExternal}
                 />
               </div>
             </div>
@@ -686,6 +691,7 @@ interface EditableTreeProps {
   onAddSibling: (parentId: string | null) => void
   onDelete: (id: string) => void
   onSetHref: (id: string, href: string) => void
+  onSetExternal: (id: string, external: boolean) => void
 }
 
 function EditableTree({
@@ -700,6 +706,7 @@ function EditableTree({
   onAddSibling,
   onDelete,
   onSetHref,
+  onSetExternal,
 }: EditableTreeProps) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
@@ -734,6 +741,7 @@ function EditableTree({
               onAddSibling={onAddSibling}
               onDelete={onDelete}
               onSetHref={onSetHref}
+              onSetExternal={onSetExternal}
             />
           ))}
           <li>
@@ -763,6 +771,7 @@ interface SortableEditableRowProps {
   onAddSibling: (parentId: string | null) => void
   onDelete: (id: string) => void
   onSetHref: (id: string, href: string) => void
+  onSetExternal: (id: string, external: boolean) => void
 }
 
 function SortableEditableRow({
@@ -777,6 +786,7 @@ function SortableEditableRow({
   onAddSibling,
   onDelete,
   onSetHref,
+  onSetExternal,
 }: SortableEditableRowProps) {
   const {
     attributes,
@@ -855,15 +865,26 @@ function SortableEditableRow({
         )}
       </div>
       {urlOpen && (
-        <div className="ml-6 mt-1 flex items-center gap-2">
-          <span className="text-[10px] font-mono text-gray-400 shrink-0">URL</span>
-          <input
-            type="text"
-            value={node.href}
-            placeholder="path/to/page"
-            onChange={e => onSetHref(node.id, e.target.value)}
-            className="flex-1 min-w-0 px-2 py-0.5 text-xs font-mono border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
-          />
+        <div className="ml-6 mt-1 space-y-1">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-mono text-gray-400 shrink-0">URL</span>
+            <input
+              type="text"
+              value={node.href}
+              placeholder="path/to/page"
+              onChange={e => onSetHref(node.id, e.target.value)}
+              className="flex-1 min-w-0 px-2 py-0.5 text-xs font-mono border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+            />
+          </div>
+          <label className="flex items-center gap-1.5 text-[11px] text-gray-600 cursor-pointer pl-9">
+            <input
+              type="checkbox"
+              checked={!!node.external}
+              onChange={e => onSetExternal(node.id, e.target.checked)}
+              className="shrink-0"
+            />
+            <span>External link <span className="text-gray-400">(keep full URL even when site-root-relative is selected)</span></span>
+          </label>
         </div>
       )}
       {node.children.length > 0 && (
@@ -879,6 +900,7 @@ function SortableEditableRow({
             onAddSibling={onAddSibling}
             onDelete={onDelete}
             onSetHref={onSetHref}
+            onSetExternal={onSetExternal}
           />
         </div>
       )}
