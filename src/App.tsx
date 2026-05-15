@@ -640,7 +640,7 @@ export default function App() {
         </div>
 
       </div>
-      <footer className="px-2 py-1 bg-white flex-shrink-0 flex justify-center sm:justify-end">
+      <footer className="sticky bottom-0 px-2 py-1 bg-white border-t border-gray-200 flex-shrink-0 flex justify-center sm:justify-end">
         <span className="text-[10px] text-gray-400 leading-none">
           Sidenav Helper v{__APP_VERSION__} •{' '}
           <a className="underline hover:text-blue-500" href={REPO_URL} target="_blank" rel="noreferrer">View on GitHub</a>
