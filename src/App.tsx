@@ -1,7 +1,17 @@
 import { useState, useMemo, useRef, useEffect, type ChangeEvent, type ClipboardEvent as RClipboardEvent } from 'react'
 
-const HELPER_URL = 'https://darrenolah.github.io/sidenavHelper/'
-const REPO_URL = 'https://github.com/DarrenOlah/sidenavHelper'
+import { HELPER_URL, REPO_URL, HERO_IMAGE_URL, HERO_VIDEO_URL } from './lib/config'
+
+type NavItem =
+  | { kind: 'current'; id: string; label: string }
+  | { kind: 'external'; id: string; label: string; href: string }
+
+const NAV_ITEMS: NavItem[] = [
+  { kind: 'external', id: 'image', label: 'Hero Image', href: HERO_IMAGE_URL },
+  { kind: 'external', id: 'video', label: 'Hero Video', href: HERO_VIDEO_URL },
+  { kind: 'current', id: 'sidenav', label: 'SideNav' },
+]
+
 import {
   DndContext,
   PointerSensor,
@@ -355,6 +365,20 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex flex-col">
       <div className="flex-1 w-full py-2 px-4">
+
+        {/* Nav: SideNav | Hero */}
+        <nav className="mb-4 text-sm" aria-label="Tool selector">
+          {NAV_ITEMS.map((item, i) => (
+            <span key={item.id}>
+              {i > 0 && <span className="mx-2 text-gray-300">|</span>}
+              {item.kind === 'external' ? (
+                <a href={item.href} className="text-gray-500 hover:text-blue-600 hover:underline">{item.label}</a>
+              ) : (
+                <span className="font-semibold text-blue-600" aria-current="page">{item.label}</span>
+              )}
+            </span>
+          ))}
+        </nav>
 
         {/* Header */}
         <div className="mb-6">
