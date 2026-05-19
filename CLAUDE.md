@@ -31,7 +31,7 @@ SitemapNode[]                      ←── editable in App via rename/toggle/r
 - `sidenav.css` via `?raw` and injected once into `<head>` so the inline preview matches the real DNN deployment.
 - `sidenav.js` as a side-effect import — its IIFE registers `window.AuSidenav` which the preview re-invokes via `initNav(navEl)` after every state change.
 
-Refresh by copying the two files from the upstream au-sidenav source.
+These files are the authoritative copy of au-sidenav's CSS and JS — edit them here as the source of truth. There is no upstream to refresh from.
 
 ### Why dnd-kit
 

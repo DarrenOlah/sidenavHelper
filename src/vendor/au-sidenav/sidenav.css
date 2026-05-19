@@ -38,6 +38,11 @@
   color: #1b1b1b;
 }
 
+/* Default Bootstrap line height. High specificity to override host page css*/
+.au-sidenav h3.au-sidenav__header {
+  line-height: 1.2;
+}
+
 /* Top-level list. Font-size is in px (not rem) so a host html font-size
  * smaller/larger than 16px doesn't change the menu's text size. */
 .au-sidenav .au-sidenav__list {
