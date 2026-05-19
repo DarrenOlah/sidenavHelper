@@ -2,8 +2,6 @@
 
 A web tool that turns a pasted, styled site-index page into a paste-ready `<nav class="au-sidenav">` block for the **au-sidenav** component.
 
-Hosted at <https://darrenolah.github.io/sidenavHelper/>.
-
 ## What it does
 
 1. **Paste** — paste the visible site index from any site (e.g. https://www.army.edu/Site-Index/) into the paste-target. The browser preserves the nested `<ul>`/`<li>`/`<a href>` structure on the clipboard's `text/html` payload. A "raw HTML" textarea is available as a fallback.
