@@ -5,6 +5,8 @@ import {
   renameNode,
   setIncluded,
   reorderSiblings,
+  promoteNode,
+  demoteNode,
   selectSubtree,
   addChild,
   addSiblingAfter,
@@ -269,6 +271,77 @@ describe('setHref', () => {
     const forest = buildSampleForest()
     const original = JSON.stringify(forest)
     setHref(forest, 'a1', '/new/')
+    expect(JSON.stringify(forest)).toBe(original)
+  })
+})
+
+describe('promoteNode', () => {
+  it('promotes a child to sit immediately after its parent', () => {
+    const forest = buildSampleForest()
+    const next = promoteNode(forest, 'a1')
+    // 'a1' was the first child of 'a'; promoting it lifts it to top level
+    // right after 'a'.
+    expect(next.map(n => n.id)).toEqual(['a', 'a1', 'b', 'c'])
+    expect(findNode(next, 'a')?.children.map(c => c.id)).toEqual(['a2'])
+  })
+
+  it('promotes a deeply nested node up one level', () => {
+    const forest = buildSampleForest()
+    const next = promoteNode(forest, 'a2a')
+    // 'a2a' lifts from a.a2.[a2a] up to a.[a2, a2a]
+    expect(findNode(next, 'a')?.children.map(c => c.id)).toEqual(['a1', 'a2', 'a2a'])
+    expect(findNode(next, 'a2')?.children).toEqual([])
+  })
+
+  it('is a no-op for top-level nodes', () => {
+    const forest = buildSampleForest()
+    const next = promoteNode(forest, 'a')
+    expect(next).toBe(forest)
+  })
+
+  it('preserves the promoted node subtree intact', () => {
+    const forest = buildSampleForest()
+    const next = promoteNode(forest, 'a2')
+    expect(findNode(next, 'a2')?.children.map(c => c.id)).toEqual(['a2a'])
+  })
+
+  it('does not mutate the input forest', () => {
+    const forest = buildSampleForest()
+    const original = JSON.stringify(forest)
+    promoteNode(forest, 'a2a')
+    expect(JSON.stringify(forest)).toBe(original)
+  })
+})
+
+describe('demoteNode', () => {
+  it('moves a node into its previous siblings children', () => {
+    const forest = buildSampleForest()
+    const next = demoteNode(forest, 'c')
+    // 'c' (idx 2 at top) demotes into 'b' (its previous sibling).
+    expect(next.map(n => n.id)).toEqual(['a', 'b'])
+    expect(findNode(next, 'b')?.children.map(c => c.id)).toEqual(['c'])
+  })
+
+  it('demotes a nested node into its previous sibling', () => {
+    const forest = buildSampleForest()
+    const next = demoteNode(forest, 'a2')
+    // 'a2' (idx 1 under 'a') demotes into 'a1'.
+    expect(findNode(next, 'a')?.children.map(c => c.id)).toEqual(['a1'])
+    expect(findNode(next, 'a1')?.children.map(c => c.id)).toEqual(['a2'])
+    // The subtree carries with it.
+    expect(findNode(next, 'a2a')).not.toBeNull()
+  })
+
+  it('is a no-op for the first sibling at any level', () => {
+    const forest = buildSampleForest()
+    expect(demoteNode(forest, 'a')).toBe(forest)
+    expect(demoteNode(forest, 'a1')).toBe(forest)
+  })
+
+  it('does not mutate the input forest', () => {
+    const forest = buildSampleForest()
+    const original = JSON.stringify(forest)
+    demoteNode(forest, 'c')
     expect(JSON.stringify(forest)).toBe(original)
   })
 })

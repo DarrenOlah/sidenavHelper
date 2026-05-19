@@ -62,9 +62,10 @@ describe('generateSidenavHtml', () => {
     expect(html).not.toContain('au-sidenav__sublist')
   })
 
-  it('uses # as href fallback for nodes with empty href', () => {
+  it('renders an empty-href node as a plain-text span (covered in depth below)', () => {
     const html = generateSidenavHtml([leaf('1', 'Heading', '')])
-    expect(html).toContain('<a href="#">Heading</a>')
+    expect(html).toContain('<span class="au-sidenav__text">Heading</span>')
+    expect(html).not.toContain('<a href="#"')
   })
 
   it('uses node.label (override) rather than defaultLabel for output', () => {
@@ -270,6 +271,47 @@ describe('generateSidenavHtml', () => {
       const html = generateSidenavHtml([node])
       expect(html).toContain('href="/docs"')
       expect(html).not.toContain('other.example.com')
+    })
+  })
+
+  describe('plain-text items (empty href)', () => {
+    it('emits a <span class="au-sidenav__text"> instead of <a> for an href-less leaf', () => {
+      const html = generateSidenavHtml([leaf('1', 'Group label', '')])
+      expect(html).toContain('<span class="au-sidenav__text">Group label</span>')
+      expect(html).not.toContain('<a href=')
+    })
+
+    it('emits a span for an href-less parent while keeping its toggle + sublist', () => {
+      const html = generateSidenavHtml([
+        parent('1', 'Group', '', [leaf('2', 'Child', '/c/')]),
+      ])
+      expect(html).toContain('<span class="au-sidenav__text">Group</span>')
+      // Parent structure must still include the toggle and sublist so sidenav.js
+      // can collapse/expand the group.
+      expect(html).toContain('au-sidenav__toggle')
+      expect(html).toContain('au-sidenav__sublist')
+      expect(html).toContain('<a href="/c/">Child</a>')
+    })
+
+    it('still escapes labels inside the plain-text span (XSS)', () => {
+      const html = generateSidenavHtml([leaf('1', '<script>x</script>', '')])
+      expect(html).not.toContain('<script>x</script>')
+      expect(html).toContain('&lt;script&gt;x&lt;/script&gt;')
+    })
+
+    it('a generated plain-text leaf round-trips through parseSitemapHtml', () => {
+      const original: SitemapNode[] = [
+        parent('1', 'Section', '/s/', [
+          leaf('2', 'Real page', '/s/p/'),
+          leaf('3', 'Just a label', ''),
+        ]),
+      ]
+      const html = generateSidenavHtml(original)
+      const { forest } = parseSitemapHtml(html)
+      const labels = forest[0].children.map(c => c.label)
+      expect(labels).toContain('Just a label')
+      const reparsed = forest[0].children.find(c => c.label === 'Just a label')
+      expect(reparsed?.href).toBe('')
     })
   })
 

@@ -73,8 +73,13 @@
 /* Links — recursive padding based on inherited depth.
  * depth 0 = top level (no indent); depth 1 = first sublist; etc.
  * font-size is set explicitly (not just inherited from the list) so host
- * rules like `nav a { font-size: ... }` don't out-specify us. */
-.au-sidenav .au-sidenav__list a {
+ * rules like `nav a { font-size: ... }` don't out-specify us.
+ *
+ * The __text variant covers rows that have no URL — they render as a
+ * non-interactive <span> so they can act as visual group labels. Same box
+ * model as the link so indentation and row height stay consistent. */
+.au-sidenav .au-sidenav__list a,
+.au-sidenav .au-sidenav__list .au-sidenav__text {
   display: block;
   box-sizing: border-box;
   width: 100%;

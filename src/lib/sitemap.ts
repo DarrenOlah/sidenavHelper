@@ -113,6 +113,24 @@ function liToNode(li: Element, baseHref: string | undefined): SitemapNode | null
         children,
       }
     }
+    // Leaf row with no anchor: recognize this helper's own plain-text marker
+    // (.au-sidenav__text — emitted for href-less items) so a generated menu
+    // re-pasted back into the helper preserves its visual group labels
+    // instead of silently dropping them.
+    const textEl = Array.from(li.children).find(
+      c => (c as HTMLElement).classList?.contains('au-sidenav__text'),
+    )
+    if (textEl) {
+      const label = (textEl.textContent || '').replace(/\s+/g, ' ').trim() || '(no label)'
+      return {
+        id: nextId(),
+        href: '',
+        defaultLabel: label,
+        label,
+        included: true,
+        children: [],
+      }
+    }
     return null
   }
 
@@ -286,6 +304,67 @@ function reorderArray<T>(arr: T[], from: number, to: number): T[] {
   return next
 }
 
+// Move `id` out of its current parent and insert immediately after that parent
+// at the grandparent's level. If the node's parent is at the top of the forest,
+// the node is inserted into the forest right after its parent. No-op when the
+// node is already a top-level forest entry (nothing to promote into).
+export function promoteNode(roots: SitemapNode[], id: string): SitemapNode[] {
+  const parent = findParent(roots, id)
+  if (!parent) return roots
+  const node = parent.children.find(c => c.id === id)
+  if (!node) return roots
+
+  const removeFrom = (siblings: SitemapNode[]) =>
+    siblings.filter(c => c.id !== id)
+
+  const grandparent = findParent(roots, parent.id)
+  if (!grandparent) {
+    const parentIdx = roots.findIndex(n => n.id === parent.id)
+    if (parentIdx === -1) return roots
+    const nextRoots = roots.map(n =>
+      n.id === parent.id ? { ...n, children: removeFrom(n.children) } : n,
+    )
+    nextRoots.splice(parentIdx + 1, 0, node)
+    return nextRoots
+  }
+
+  return mapTree(roots, n => {
+    if (n.id === parent.id) return { ...n, children: removeFrom(n.children) }
+    if (n.id === grandparent.id) {
+      const parentIdx = n.children.findIndex(c => c.id === parent.id)
+      if (parentIdx === -1) return n
+      const children = n.children.slice()
+      children.splice(parentIdx + 1, 0, node)
+      return { ...n, children }
+    }
+    return n
+  })
+}
+
+// Move `id` into the previous sibling's children (appended at the end). No-op
+// when the node is already the first child of its parent (or first in the forest).
+export function demoteNode(roots: SitemapNode[], id: string): SitemapNode[] {
+  const parent = findParent(roots, id)
+  const siblings = parent ? parent.children : roots
+  const idx = siblings.findIndex(n => n.id === id)
+  if (idx <= 0) return roots
+  const node = siblings[idx]
+  const newParent = siblings[idx - 1]
+
+  const transform = (arr: SitemapNode[]): SitemapNode[] => {
+    const next = arr.slice()
+    next.splice(idx, 1)
+    return next.map(n =>
+      n.id === newParent.id ? { ...n, children: [...n.children, node] } : n,
+    )
+  }
+
+  if (!parent) return transform(roots)
+  return mapTree(roots, n =>
+    n.id === parent.id ? { ...n, children: transform(n.children) } : n,
+  )
+}
+
 // Returns the subtree rooted at `id` as a one-element forest (so the caller
 // can treat the result as the "active forest" the same way as the full one).
 // If `id` doesn't match anything, returns the original forest unchanged.
@@ -433,11 +512,20 @@ function renderItem(
   const effectiveMode: HrefMode = node.external ? 'absolute' : hrefMode
   const href = escapeAttr(safeHref(transformHref(node.href, effectiveMode)))
 
+  // A node whose href is blank renders as plain text instead of an anchor,
+  // so users can build visual groupings without a real underlying page.
+  // safeHref returns '#' for unsafe schemes too — we still emit those as <a>
+  // (going to '#') so the user can see the row exists and is broken.
+  const isPlainText = node.href.trim() === ''
+  const linkHtml = isPlainText
+    ? `<span class="au-sidenav__text">${label}</span>`
+    : `<a href="${href}">${label}</a>`
+
   const includedChildren = node.children.filter(c => c.included)
 
   if (includedChildren.length === 0) {
     // defaultExpanded only meaningful for parents — leaves ignore it.
-    return `${pad}<li class="au-sidenav__item">\n${pad}  <a href="${href}">${label}</a>\n${pad}</li>`
+    return `${pad}<li class="au-sidenav__item">\n${pad}  ${linkHtml}\n${pad}</li>`
   }
 
   const childrenHtml = includedChildren
@@ -453,7 +541,7 @@ function renderItem(
 
   return [
     `${pad}<li ${liAttrs}>`,
-    `${pad}  <a href="${href}">${label}</a>`,
+    `${pad}  ${linkHtml}`,
     `${pad}  <button type="button" class="au-sidenav__toggle" aria-label="Toggle submenu"></button>`,
     `${pad}  <ul class="au-sidenav__sublist">`,
     childrenHtml,

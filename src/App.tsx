@@ -54,6 +54,8 @@ import {
   renameNode,
   setIncluded,
   reorderSiblings,
+  promoteNode,
+  demoteNode,
   selectSubtree,
   findNode,
   makeNode,
@@ -299,6 +301,12 @@ export default function App() {
       return { ...s, forest: reorderSiblings(s.forest, parentId, fromIndex, toIndex) }
     })
 
+  const handlePromote = (id: string) =>
+    setState(s => ({ ...s, forest: promoteNode(s.forest, id) }))
+
+  const handleDemote = (id: string) =>
+    setState(s => ({ ...s, forest: demoteNode(s.forest, id) }))
+
   // Adds a child under the named parent. The new id is recorded in addedIds
   // so the row gets a delete button and an auto-opened URL editor.
   const handleAddChild = (parentId: string) =>
@@ -541,6 +549,7 @@ export default function App() {
                   nodes={displayedForest}
                   parentId={null}
                   pinnedId={hasPickedRoot && rootMode === 'sibling' ? rootId : null}
+                  promoteBoundaryId={hasPickedRoot ? rootId : null}
                   addedIds={addedIds}
                   onRename={handleRename}
                   onToggle={handleToggleInclude}
@@ -550,6 +559,8 @@ export default function App() {
                   onDelete={handleDelete}
                   onSetHref={handleSetHref}
                   onSetExternal={handleSetExternal}
+                  onPromote={handlePromote}
+                  onDemote={handleDemote}
                 />
               </div>
             </div>
@@ -812,6 +823,11 @@ interface EditableTreeProps {
   // handle and is excluded from reorders. Used by 'sibling' rootMode to pin
   // the synthetic root row at index 0.
   pinnedId?: string | null
+  // When set, promote is disabled for any row whose displayed parent matches
+  // this id. Used to keep edits inside the picked subtree (the picked root
+  // itself is the boundary; promoting one of its children would lift the
+  // node out of the visible editor).
+  promoteBoundaryId?: string | null
   addedIds: Set<string>
   onRename: (id: string, label: string) => void
   onToggle: (id: string, included: boolean) => void
@@ -821,12 +837,15 @@ interface EditableTreeProps {
   onDelete: (id: string) => void
   onSetHref: (id: string, href: string) => void
   onSetExternal: (id: string, external: boolean) => void
+  onPromote: (id: string) => void
+  onDemote: (id: string) => void
 }
 
 function EditableTree({
   nodes,
   parentId,
   pinnedId = null,
+  promoteBoundaryId = null,
   addedIds,
   onRename,
   onToggle,
@@ -836,6 +855,8 @@ function EditableTree({
   onDelete,
   onSetHref,
   onSetExternal,
+  onPromote,
+  onDemote,
 }: EditableTreeProps) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
@@ -856,13 +877,21 @@ function EditableTree({
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
       <SortableContext items={nodes.map(n => n.id)} strategy={verticalListSortingStrategy}>
         <ul className="space-y-1">
-          {nodes.map(node => (
+          {nodes.map((node, idx) => (
             <SortableEditableRow
               key={node.id}
               node={node}
               pinned={pinnedId === node.id}
               isAdded={addedIds.has(node.id)}
               addedIds={addedIds}
+              // Promote crosses out of the current level — disable when there
+              // is no level above to land in: at the top of the forest, or at
+              // the picked-root boundary in a rooted view.
+              canPromote={parentId !== null && parentId !== promoteBoundaryId}
+              // Demote moves into the previous sibling — needs one to exist,
+              // and never operates on the pinned (root) row in sibling mode.
+              canDemote={idx > (pinnedId ? 1 : 0) && pinnedId !== node.id}
+              promoteBoundaryId={promoteBoundaryId}
               onRename={onRename}
               onToggle={onToggle}
               onReorder={onReorder}
@@ -871,6 +900,8 @@ function EditableTree({
               onDelete={onDelete}
               onSetHref={onSetHref}
               onSetExternal={onSetExternal}
+              onPromote={onPromote}
+              onDemote={onDemote}
             />
           ))}
           <li>
@@ -893,6 +924,9 @@ interface SortableEditableRowProps {
   pinned?: boolean
   isAdded: boolean
   addedIds: Set<string>
+  canPromote: boolean
+  canDemote: boolean
+  promoteBoundaryId?: string | null
   onRename: (id: string, label: string) => void
   onToggle: (id: string, included: boolean) => void
   onReorder: (parentId: string | null, from: number, to: number) => void
@@ -901,6 +935,8 @@ interface SortableEditableRowProps {
   onDelete: (id: string) => void
   onSetHref: (id: string, href: string) => void
   onSetExternal: (id: string, external: boolean) => void
+  onPromote: (id: string) => void
+  onDemote: (id: string) => void
 }
 
 function SortableEditableRow({
@@ -908,6 +944,9 @@ function SortableEditableRow({
   pinned = false,
   isAdded,
   addedIds,
+  canPromote,
+  canDemote,
+  promoteBoundaryId = null,
   onRename,
   onToggle,
   onReorder,
@@ -916,6 +955,8 @@ function SortableEditableRow({
   onDelete,
   onSetHref,
   onSetExternal,
+  onPromote,
+  onDemote,
 }: SortableEditableRowProps) {
   const {
     attributes,
@@ -974,6 +1015,26 @@ function SortableEditableRow({
         </button>
         <button
           type="button"
+          onClick={() => onPromote(node.id)}
+          disabled={!canPromote || pinned}
+          aria-label="Promote (outdent)"
+          title="Promote (outdent)"
+          className="shrink-0 px-1.5 py-0.5 text-xs rounded border border-gray-200 text-gray-500 enabled:hover:text-blue-700 enabled:hover:border-blue-300 disabled:opacity-30 disabled:cursor-not-allowed"
+        >
+          ⇤
+        </button>
+        <button
+          type="button"
+          onClick={() => onDemote(node.id)}
+          disabled={!canDemote || pinned}
+          aria-label="Demote (indent)"
+          title="Demote (indent)"
+          className="shrink-0 px-1.5 py-0.5 text-xs rounded border border-gray-200 text-gray-500 enabled:hover:text-blue-700 enabled:hover:border-blue-300 disabled:opacity-30 disabled:cursor-not-allowed"
+        >
+          ⇥
+        </button>
+        <button
+          type="button"
           onClick={() => onAddChild(node.id)}
           aria-label="Add child page"
           title="Add child page"
@@ -1021,6 +1082,7 @@ function SortableEditableRow({
           <EditableTree
             nodes={node.children}
             parentId={node.id}
+            promoteBoundaryId={promoteBoundaryId}
             addedIds={addedIds}
             onRename={onRename}
             onToggle={onToggle}
@@ -1030,6 +1092,8 @@ function SortableEditableRow({
             onDelete={onDelete}
             onSetHref={onSetHref}
             onSetExternal={onSetExternal}
+            onPromote={onPromote}
+            onDemote={onDemote}
           />
         </div>
       )}
