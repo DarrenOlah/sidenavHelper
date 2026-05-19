@@ -105,9 +105,7 @@
 
 /* Vertical accent bar to the LEFT of the current ancestor chain.
  * Drawn as ::after on the OUTER (top-level) ancestor; the bar runs the full
- * height of its expanded subtree thanks to the absolute positioning.
- * Color is swapped by sidenavHelper's applyAccentColor at output time; the
- * marker below (#FFCC33 + the trailing comment) is the regex anchor. */
+ * height of its expanded subtree thanks to the absolute positioning. */
 .au-sidenav .au-sidenav__list > .au-sidenav__item--current-section::after {
   content: "";
   display: block;

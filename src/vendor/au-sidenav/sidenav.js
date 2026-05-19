@@ -154,9 +154,9 @@
     }
 
     // 3. Delegated click handler for toggle buttons. Bound once per nav,
-    //    tracked separately from the init flag so callers (e.g. the demo
-    //    page) can clear init and re-run state setup without stacking
-    //    duplicate click handlers on every re-init.
+    //    tracked separately from the init flag so callers can clear init
+    //    and re-run state setup without stacking duplicate click handlers
+    //    on every re-init.
     if (nav.dataset.auSidenavBound !== "1") {
       nav.dataset.auSidenavBound = "1";
       nav.addEventListener("click", function (e) {
