@@ -86,6 +86,10 @@ interface State {
   pageCount: number
   maxDepth: number
   parseError: string
+  // Href of the link the user clicked in the preview to simulate "you are
+  // currently on this page". Fed through data-au-current-path to the vendored
+  // sidenav.js so the preview shows the gold accent bar + current-link styling.
+  previewCurrentPath: string | null
   // Ids of nodes the user added (vs. parsed from the pasted sitemap). Drives
   // delete-button visibility and auto-opens the URL editor on those rows.
   addedIds: Set<string>
@@ -103,6 +107,7 @@ const INITIAL_STATE: State = {
   pageCount: 0,
   maxDepth: 0,
   parseError: '',
+  previewCurrentPath: null,
   addedIds: new Set(),
 }
 
@@ -155,7 +160,7 @@ export default function App() {
   const [copied, setCopied] = useState(false)
   const pasteRef = useRef<HTMLDivElement | null>(null)
 
-  const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, accentColor, pageCount, maxDepth, parseError, addedIds } = state
+  const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, accentColor, pageCount, maxDepth, parseError, previewCurrentPath, addedIds } = state
 
   const hasForest = forest.length > 0
   const hasPickedRoot = rootId !== null && findNode(forest, rootId) !== null
@@ -357,6 +362,9 @@ export default function App() {
   const handleAccentColor = (color: string) =>
     setState(s => ({ ...s, accentColor: color }))
 
+  const handleSelectPreviewPath = (href: string) =>
+    setState(s => ({ ...s, previewCurrentPath: href }))
+
   const handleCopy = () => {
     if (!outputHtml) return
     navigator.clipboard.writeText(outputHtml).then(() => {
@@ -552,7 +560,12 @@ export default function App() {
             <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
               <h2 className="text-base font-semibold text-gray-800 mb-2">Live preview</h2>
               {hasForest ? (
-                <SidenavPreview html={generatedHtml} accentColor={accentColor} />
+                <SidenavPreview
+                  html={generatedHtml}
+                  accentColor={accentColor}
+                  currentPath={previewCurrentPath}
+                  onSelectPath={handleSelectPreviewPath}
+                />
               ) : (
                 <div className="rounded-lg border-2 border-dashed border-gray-200 bg-gray-50 flex items-center justify-center h-32">
                   <p className="text-xs text-gray-400">Preview will appear once you paste a site index.</p>
@@ -1043,25 +1056,67 @@ function applyPreviewSidenavCss(color: string) {
   style.textContent = applyAccentColor(sidenavCss, color)
 }
 
-function SidenavPreview({ html, accentColor }: { html: string; accentColor: string }) {
+interface SidenavPreviewProps {
+  html: string
+  accentColor: string
+  currentPath: string | null
+  onSelectPath: (href: string) => void
+}
+
+// Class modifiers that sidenav.js applies during initNav based on the current
+// path. On a re-init with a different path we strip them first so the new
+// init runs against a clean slate (initNav uses classList.add, not replace).
+const SIDENAV_INIT_CLASSES = [
+  'au-sidenav__link--current',
+  'au-sidenav__item--current-section',
+  'au-sidenav__item--expanded',
+  'au-sidenav__item--collapsed',
+]
+
+function SidenavPreview({ html, accentColor, currentPath, onSelectPath }: SidenavPreviewProps) {
   const wrapRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => { applyPreviewSidenavCss(accentColor) }, [accentColor])
 
-  // After every HTML change, (1) initialize the sidenav (chevron toggles +
-  // depth indents) and (2) force preview links to open in a new tab so
-  // clicking one doesn't navigate away from the helper. Step 2 is preview-
-  // only — it doesn't touch the generated HTML the user copies.
+  // After every HTML or current-path change, (re)initialize the sidenav so
+  // chevron toggles + depth indents + current-page highlighting reflect the
+  // latest state. When html changed the DOM is fresh from
+  // dangerouslySetInnerHTML so the cleanup is a no-op; when only currentPath
+  // changed we strip the previous init's class modifiers and clear the init
+  // flag so initNav re-evaluates against the new path.
   useEffect(() => {
     const wrap = wrapRef.current
     if (!wrap) return
-    const nav = wrap.querySelector('.au-sidenav')
-    if (nav && window.AuSidenav) window.AuSidenav.initNav(nav)
-    wrap.querySelectorAll('a[href]').forEach(a => {
-      a.setAttribute('target', '_blank')
-      a.setAttribute('rel', 'noopener noreferrer')
-    })
-  }, [html])
+    const nav = wrap.querySelector<HTMLElement>('.au-sidenav')
+    if (!nav || !window.AuSidenav) return
+    if (currentPath) nav.setAttribute('data-au-current-path', currentPath)
+    else nav.removeAttribute('data-au-current-path')
+    for (const cls of SIDENAV_INIT_CLASSES) {
+      nav.querySelectorAll('.' + cls).forEach(el => el.classList.remove(cls))
+    }
+    delete nav.dataset.auSidenavInit
+    window.AuSidenav.initNav(nav)
+  }, [html, currentPath])
+
+  // Intercept link clicks: a plain click sets the previewed current page;
+  // ctrl/cmd/shift-click and middle-click fall through so the browser's
+  // native "open in new tab/window" still works. Chevron toggles are
+  // <button>s, not anchors, so sidenav.js's own delegated handler is
+  // unaffected.
+  useEffect(() => {
+    const wrap = wrapRef.current
+    if (!wrap) return
+    const onClick = (e: MouseEvent) => {
+      const target = e.target as Element | null
+      const a = target?.closest('a[href]') as HTMLAnchorElement | null
+      if (!a || !wrap.contains(a)) return
+      if (e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return
+      e.preventDefault()
+      onSelectPath(a.getAttribute('href') || '')
+    }
+    wrap.addEventListener('click', onClick)
+    return () => wrap.removeEventListener('click', onClick)
+  }, [onSelectPath])
 
   return (
     <div
