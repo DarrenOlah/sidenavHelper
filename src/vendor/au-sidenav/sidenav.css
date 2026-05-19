@@ -103,9 +103,11 @@
   font-weight: 700;
 }
 
-/* Vertical Army-Gold accent bar to the LEFT of the current ancestor chain.
+/* Vertical accent bar to the LEFT of the current ancestor chain.
  * Drawn as ::after on the OUTER (top-level) ancestor; the bar runs the full
- * height of its expanded subtree thanks to the absolute positioning. */
+ * height of its expanded subtree thanks to the absolute positioning.
+ * Color is swapped by sidenavHelper's applyAccentColor at output time; the
+ * marker below (#FFCC33 + the trailing comment) is the regex anchor. */
 .au-sidenav .au-sidenav__list > .au-sidenav__item--current-section::after {
   content: "";
   display: block;
