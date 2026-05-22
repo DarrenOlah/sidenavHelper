@@ -1266,7 +1266,7 @@ function SortableEditableRow({
               onChange={e => onSetExternal(node.id, e.target.checked)}
               className="shrink-0"
             />
-            <span>External link <span className="text-gray-400">(keep full URL even when site-root-relative is selected)</span></span>
+            <span>External link <span className="text-gray-400">(use full link URL and open in new tab)</span></span>
           </label>
         </div>
       )}
@@ -1335,25 +1335,34 @@ function SidenavPreview({ html, accentColor, currentPath, onSelectPath }: Sidena
 
   useEffect(() => { applyPreviewSidenavCss(accentColor) }, [accentColor])
 
-  // After every HTML or current-path change, (re)initialize the sidenav so
-  // chevron toggles + depth indents + current-page highlighting reflect the
-  // latest state. When html changed the DOM is fresh from
-  // dangerouslySetInnerHTML so the cleanup is a no-op; when only currentPath
-  // changed we strip the previous init's class modifiers and clear the init
-  // flag so initNav re-evaluates against the new path.
+  // (Re)initialize the sidenav so chevron toggles + depth indents +
+  // current-page highlighting reflect the latest state. Triggered by:
+  //   (a) the wrapper's children changing — i.e. dangerouslySetInnerHTML has
+  //       just replaced the nav — caught via MutationObserver. Using the
+  //       observer instead of `useEffect([html])` avoids a timing race where
+  //       the effect could fire before the inner DOM was queryable on large
+  //       pastes, leaving the preview rendered as a flat list (no `--depth`,
+  //       no collapsed/expanded classes).
+  //   (b) currentPath changing — re-run init so the current marker updates.
   useEffect(() => {
     const wrap = wrapRef.current
     if (!wrap) return
-    const nav = wrap.querySelector<HTMLElement>('.au-sidenav')
-    if (!nav || !window.AuSidenav) return
-    if (currentPath) nav.setAttribute('data-au-current-path', currentPath)
-    else nav.removeAttribute('data-au-current-path')
-    for (const cls of SIDENAV_INIT_CLASSES) {
-      nav.querySelectorAll('.' + cls).forEach(el => el.classList.remove(cls))
+    const initIfPresent = () => {
+      const nav = wrap.querySelector<HTMLElement>('.au-sidenav')
+      if (!nav || !window.AuSidenav) return
+      if (currentPath) nav.setAttribute('data-au-current-path', currentPath)
+      else nav.removeAttribute('data-au-current-path')
+      for (const cls of SIDENAV_INIT_CLASSES) {
+        nav.querySelectorAll('.' + cls).forEach(el => el.classList.remove(cls))
+      }
+      delete nav.dataset.auSidenavInit
+      window.AuSidenav.initNav(nav)
     }
-    delete nav.dataset.auSidenavInit
-    window.AuSidenav.initNav(nav)
-  }, [html, currentPath])
+    initIfPresent()
+    const observer = new MutationObserver(initIfPresent)
+    observer.observe(wrap, { childList: true })
+    return () => observer.disconnect()
+  }, [currentPath])
 
   // Intercept link clicks: a plain click sets the previewed current page;
   // ctrl/cmd/shift-click and middle-click fall through so the browser's
