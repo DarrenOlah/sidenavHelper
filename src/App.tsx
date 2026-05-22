@@ -250,6 +250,11 @@ export default function App() {
     const detectedList = detectSiteUrls(result.forest)
     const detected = detectedList[0] ?? ''
     const forest = applySiteUrl(result.forest, detected)
+    // Round-trip a previously-generated menu's custom header. The default is
+    // "In this section"; only override when the pasted markup carried a real
+    // custom header so a fresh sitemap paste doesn't clobber the user's edits.
+    const hasCustomHeader =
+      result.detectedHeaderText !== '' && result.detectedHeaderText !== 'In this section'
     setState(s => ({
       ...s,
       forest,
@@ -260,6 +265,7 @@ export default function App() {
       siteUrl: detected,
       detectedSiteUrl: detected,
       detectedSiteUrls: detectedList,
+      headerText: hasCustomHeader ? result.detectedHeaderText : s.headerText,
     }))
   }
 

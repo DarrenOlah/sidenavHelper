@@ -23,6 +23,11 @@ export interface ParseResult {
   forest: SitemapNode[]
   pageCount: number
   maxDepth: number
+  // Text content of the first `.au-sidenav__header` element in the pasted
+  // markup, if any. Empty string when no header was found. Lets the App
+  // round-trip a previously-generated menu's custom header back into the
+  // "Header text" field.
+  detectedHeaderText: string
 }
 
 // ── Parsing ─────────────────────────────────────────────────────────────────
@@ -46,11 +51,13 @@ export function parseSitemapHtml(html: string): ParseResult {
   resetIds()
 
   if (!html || !html.trim()) {
-    return { forest: [], pageCount: 0, maxDepth: 0 }
+    return { forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '' }
   }
 
   const doc = new DOMParser().parseFromString(html, 'text/html')
   const baseHref = doc.querySelector('base')?.getAttribute('href') ?? undefined
+  const headerEl = doc.querySelector('.au-sidenav__header')
+  const detectedHeaderText = (headerEl?.textContent || '').replace(/\s+/g, ' ').trim()
 
   // Find candidate top-level <ul> elements: every <ul> that is NOT contained
   // inside another <ul>. This covers both "selection includes the wrapper"
@@ -65,14 +72,14 @@ export function parseSitemapHtml(html: string): ParseResult {
     const forest = links
       .map(a => buildLeaf(a as HTMLAnchorElement, baseHref))
       .filter((n): n is SitemapNode => n !== null)
-    return summarize(forest)
+    return summarize(forest, detectedHeaderText)
   }
 
   const forest: SitemapNode[] = []
   for (const ul of topLists) {
     forest.push(...listToNodes(ul, baseHref))
   }
-  return summarize(forest)
+  return summarize(forest, detectedHeaderText)
 }
 
 function listToNodes(ul: Element, baseHref: string | undefined): SitemapNode[] {
@@ -216,7 +223,7 @@ function resolveHref(raw: string, baseHref: string | undefined): string {
   }
 }
 
-function summarize(forest: SitemapNode[]): ParseResult {
+function summarize(forest: SitemapNode[], detectedHeaderText = ''): ParseResult {
   let pageCount = 0
   let maxDepth = 0
   function walk(nodes: SitemapNode[], depth: number): void {
@@ -227,7 +234,7 @@ function summarize(forest: SitemapNode[]): ParseResult {
     }
   }
   walk(forest, 1)
-  return { forest, pageCount, maxDepth }
+  return { forest, pageCount, maxDepth, detectedHeaderText }
 }
 
 // ── Tree mutations (immutable) ──────────────────────────────────────────────

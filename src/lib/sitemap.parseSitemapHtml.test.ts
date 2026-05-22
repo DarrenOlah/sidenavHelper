@@ -3,8 +3,38 @@ import { parseSitemapHtml } from './sitemap'
 
 describe('parseSitemapHtml', () => {
   it('returns an empty forest for empty input', () => {
-    expect(parseSitemapHtml('')).toEqual({ forest: [], pageCount: 0, maxDepth: 0 })
-    expect(parseSitemapHtml('   ')).toEqual({ forest: [], pageCount: 0, maxDepth: 0 })
+    expect(parseSitemapHtml('')).toEqual({ forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '' })
+    expect(parseSitemapHtml('   ')).toEqual({ forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '' })
+  })
+
+  describe('detectedHeaderText', () => {
+    it('returns empty string when no .au-sidenav__header is present', () => {
+      const html = `<ul><li><a href="/a/">A</a></li></ul>`
+      expect(parseSitemapHtml(html).detectedHeaderText).toBe('')
+    })
+
+    it('extracts the text of the first .au-sidenav__header element', () => {
+      const html = `
+        <nav class="au-sidenav">
+          <h3 class="au-sidenav__header">Programs &amp; Degrees</h3>
+          <ul class="au-sidenav__list">
+            <li><a href="/a/">A</a></li>
+          </ul>
+        </nav>
+      `
+      expect(parseSitemapHtml(html).detectedHeaderText).toBe('Programs & Degrees')
+    })
+
+    it('collapses whitespace in the detected header text', () => {
+      const html = `
+        <h3 class="au-sidenav__header">
+          About
+          Us
+        </h3>
+        <ul><li><a href="/a/">A</a></li></ul>
+      `
+      expect(parseSitemapHtml(html).detectedHeaderText).toBe('About Us')
+    })
   })
 
   it('parses a flat single-level <ul>', () => {
