@@ -180,6 +180,11 @@ function SectionLabel({ number, title, done }: SectionLabelProps) {
 export default function App() {
   const [state, setState] = useState<State>(INITIAL_STATE)
   const [copied, setCopied] = useState(false)
+  // Expanded mode hides cols 1 & 4 and reshapes cols 2/3 to a 3:1 ratio
+  // (Edit menu + Live preview only) for iterating on the menu in cramped layouts.
+  // Only meaningful at the lg breakpoint; below that, columns stack and the
+  // toggle has no visual effect.
+  const [expanded, setExpanded] = useState(false)
   const pasteRef = useRef<HTMLDivElement | null>(null)
 
   const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, accentColor, pageCount, maxDepth, parseError, previewCurrentPath, addedIds, siteUrl, detectedSiteUrl, detectedSiteUrls } = state
@@ -459,7 +464,7 @@ export default function App() {
         <div className="flex flex-col lg:flex-row gap-4 items-start">
 
           {/* ── COL 1: Paste + Choose root ── */}
-          <div className="w-full lg:flex-1 lg:min-w-0 space-y-4">
+          <div className={`w-full lg:flex-1 lg:min-w-0 space-y-4 ${expanded ? 'lg:hidden' : ''}`}>
 
             {/* Section 1: Paste */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
@@ -578,10 +583,21 @@ export default function App() {
           </div>
 
           {/* ── COL 2: Edit Menu ── */}
-          <div className="w-full lg:flex-1 lg:min-w-0">
+          <div className={`w-full lg:min-w-0 ${expanded ? 'lg:flex-[3]' : 'lg:flex-1'}`}>
             <div className={`bg-white rounded-xl shadow-sm border border-gray-100 p-4 transition-opacity
               ${hasForest ? 'opacity-100' : 'opacity-50 pointer-events-none'}`}>
-              <SectionLabel number={3} title="Edit Menu" done={hasForest} />
+              <div className="flex items-start justify-between gap-2">
+                <SectionLabel number={3} title="Edit Menu" done={hasForest} />
+                <button
+                  type="button"
+                  onClick={() => setExpanded(e => !e)}
+                  title={expanded ? 'Restore all panels' : 'Expand Edit Menu + Preview only'}
+                  aria-pressed={expanded}
+                  className="hidden lg:inline-flex shrink-0 items-center gap-1 text-[11px] px-2 py-1 rounded border border-gray-200 text-gray-500 hover:text-blue-700 hover:border-blue-300"
+                >
+                  {expanded ? '⤢ Collapse' : '⤢ Expand'}
+                </button>
+              </div>
               <div className="mb-3">
                 <AccentColorPicker value={accentColor} onChange={handleAccentColor} />
               </div>
@@ -641,7 +657,7 @@ export default function App() {
           </div>
 
           {/* ── COL 4: HTML output ── */}
-          <div className="w-full lg:flex-1 lg:min-w-0">
+          <div className={`w-full lg:flex-1 lg:min-w-0 ${expanded ? 'lg:hidden' : ''}`}>
             <div className={`bg-white rounded-xl shadow-sm border p-4 transition-opacity
               ${hasForest ? 'border-gray-100 opacity-100' : 'border-gray-100 opacity-50 pointer-events-none'}`}>
               <SectionLabel number={4} title="Your HTML code" done={false} />
