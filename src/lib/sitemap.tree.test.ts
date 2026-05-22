@@ -13,6 +13,10 @@ import {
   removeNode,
   setHref,
   setExternal,
+  detectSiteUrl,
+  detectSiteUrls,
+  applySiteUrl,
+  isValidSiteUrl,
   makeNode,
   type SitemapNode,
 } from './sitemap'
@@ -364,6 +368,197 @@ describe('setExternal', () => {
     const forest = buildSampleForest()
     const original = JSON.stringify(forest)
     setExternal(forest, 'a1', true)
+    expect(JSON.stringify(forest)).toBe(original)
+  })
+})
+
+function nodeWithHref(id: string, href: string, children: SitemapNode[] = []): SitemapNode {
+  return { id, href, defaultLabel: id, label: id, included: true, children }
+}
+
+describe('detectSiteUrl', () => {
+  it('returns the most common origin with a trailing slash', () => {
+    const forest = [
+      nodeWithHref('1', 'https://www.army.edu/about'),
+      nodeWithHref('2', 'https://www.army.edu/contact'),
+      nodeWithHref('3', 'https://www.army.edu/news'),
+      nodeWithHref('4', 'https://other.example.com/foo'),
+    ]
+    expect(detectSiteUrl(forest)).toBe('https://www.army.edu/')
+  })
+
+  it('counts origins across nested children', () => {
+    const forest = [
+      nodeWithHref('1', 'https://other.example.com/x', [
+        nodeWithHref('1a', 'https://www.army.edu/a'),
+        nodeWithHref('1b', 'https://www.army.edu/b'),
+      ]),
+      nodeWithHref('2', 'https://www.army.edu/c'),
+    ]
+    expect(detectSiteUrl(forest)).toBe('https://www.army.edu/')
+  })
+
+  it('returns empty string when no node has a parseable absolute href', () => {
+    const forest = [
+      nodeWithHref('1', '/relative/path'),
+      nodeWithHref('2', ''),
+    ]
+    expect(detectSiteUrl(forest)).toBe('')
+  })
+
+  it('returns empty string for an empty forest', () => {
+    expect(detectSiteUrl([])).toBe('')
+  })
+
+  it('tie-break: first origin encountered in tree order wins', () => {
+    const forest = [
+      nodeWithHref('1', 'https://first.example.com/a'),
+      nodeWithHref('2', 'https://second.example.com/b'),
+    ]
+    expect(detectSiteUrl(forest)).toBe('https://first.example.com/')
+  })
+
+  it('ignores nodes with empty hrefs when tallying', () => {
+    const forest = [
+      nodeWithHref('1', ''),
+      nodeWithHref('2', 'https://www.army.edu/a'),
+    ]
+    expect(detectSiteUrl(forest)).toBe('https://www.army.edu/')
+  })
+})
+
+describe('detectSiteUrls', () => {
+  it('returns every distinct origin ranked by frequency descending', () => {
+    const forest = [
+      nodeWithHref('1', 'https://www.army.edu/about'),
+      nodeWithHref('2', 'https://other.example.com/x'),
+      nodeWithHref('3', 'https://www.army.edu/contact'),
+      nodeWithHref('4', 'https://www.army.edu/news'),
+      nodeWithHref('5', 'https://docs.army.edu/api'),
+    ]
+    expect(detectSiteUrls(forest)).toEqual([
+      'https://www.army.edu/',
+      'https://other.example.com/',
+      'https://docs.army.edu/',
+    ])
+  })
+
+  it('tie-break preserves first-encountered tree order', () => {
+    const forest = [
+      nodeWithHref('1', 'https://first.example.com/a'),
+      nodeWithHref('2', 'https://second.example.com/b'),
+      nodeWithHref('3', 'https://third.example.com/c'),
+    ]
+    expect(detectSiteUrls(forest)).toEqual([
+      'https://first.example.com/',
+      'https://second.example.com/',
+      'https://third.example.com/',
+    ])
+  })
+
+  it('returns [] when no node has a parseable absolute href', () => {
+    expect(detectSiteUrls([nodeWithHref('1', '/relative')])).toEqual([])
+    expect(detectSiteUrls([])).toEqual([])
+  })
+
+  it('every result ends with a trailing slash', () => {
+    const forest = [
+      nodeWithHref('1', 'https://www.army.edu/about'),
+      nodeWithHref('2', 'https://other.example.com/x'),
+    ]
+    for (const url of detectSiteUrls(forest)) {
+      expect(url.endsWith('/')).toBe(true)
+    }
+  })
+})
+
+describe('isValidSiteUrl', () => {
+  it('blank is invalid (a site URL is required)', () => {
+    expect(isValidSiteUrl('')).toBe(false)
+  })
+
+  it('full URL with trailing slash is valid', () => {
+    expect(isValidSiteUrl('https://www.army.edu/')).toBe(true)
+  })
+
+  it('full URL with a path + trailing slash is valid', () => {
+    expect(isValidSiteUrl('https://www.army.edu/about/')).toBe(true)
+  })
+
+  it('rejects URL without trailing slash', () => {
+    expect(isValidSiteUrl('https://www.army.edu')).toBe(false)
+  })
+
+  it('rejects partial host (no trailing slash)', () => {
+    expect(isValidSiteUrl('https://www.army')).toBe(false)
+  })
+
+  it('rejects non-URL strings', () => {
+    expect(isValidSiteUrl('not a url')).toBe(false)
+  })
+
+  it('rejects a relative path (URL constructor needs a base)', () => {
+    expect(isValidSiteUrl('/relative/')).toBe(false)
+  })
+})
+
+describe('applySiteUrl', () => {
+  it('marks hrefs not starting with siteUrl as external', () => {
+    const forest = [
+      nodeWithHref('1', 'https://www.army.edu/about'),
+      nodeWithHref('2', 'https://other.example.com/x'),
+    ]
+    const result = applySiteUrl(forest, 'https://www.army.edu/')
+    expect(findNode(result, '1')?.external).toBe(false)
+    expect(findNode(result, '2')?.external).toBe(true)
+  })
+
+  it('recurses into children', () => {
+    const forest = [
+      nodeWithHref('1', 'https://www.army.edu/a', [
+        nodeWithHref('1a', 'https://other.example.com/y'),
+        nodeWithHref('1b', 'https://www.army.edu/b'),
+      ]),
+    ]
+    const result = applySiteUrl(forest, 'https://www.army.edu/')
+    expect(findNode(result, '1a')?.external).toBe(true)
+    expect(findNode(result, '1b')?.external).toBe(false)
+  })
+
+  it('leaves empty-href (plain-text) rows alone', () => {
+    const forest = [
+      nodeWithHref('1', ''),
+      nodeWithHref('2', 'https://other.example.com/x'),
+    ]
+    const result = applySiteUrl(forest, 'https://www.army.edu/')
+    expect(findNode(result, '1')?.external).toBeUndefined()
+    expect(findNode(result, '2')?.external).toBe(true)
+  })
+
+  it('blank siteUrl treats every link as internal', () => {
+    const forest = [
+      nodeWithHref('1', 'https://www.army.edu/a'),
+      nodeWithHref('2', 'https://other.example.com/x'),
+    ]
+    const result = applySiteUrl(forest, '')
+    expect(findNode(result, '1')?.external).toBe(false)
+    expect(findNode(result, '2')?.external).toBe(false)
+  })
+
+  it('overwrites prior external flags', () => {
+    const forest = [
+      { ...nodeWithHref('1', 'https://www.army.edu/a'), external: true },
+      { ...nodeWithHref('2', 'https://other.example.com/x'), external: false },
+    ]
+    const result = applySiteUrl(forest, 'https://www.army.edu/')
+    expect(findNode(result, '1')?.external).toBe(false)
+    expect(findNode(result, '2')?.external).toBe(true)
+  })
+
+  it('does not mutate the input forest', () => {
+    const forest = [nodeWithHref('1', 'https://other.example.com/x')]
+    const original = JSON.stringify(forest)
+    applySiteUrl(forest, 'https://www.army.edu/')
     expect(JSON.stringify(forest)).toBe(original)
   })
 })

@@ -17,6 +17,7 @@
     "postversion": "git push --follow-tags"
   },
   "dependencies": {
+    "@base-ui/react": "^1.5.0",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
@@ -35,8 +36,8 @@
     "eslint": "^10.3.0",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "postcss": "^8.4.47",
     "happy-dom": "^15.11.7",
+    "postcss": "^8.4.47",
     "tailwindcss": "^4.2.4",
     "typescript": "^6.0.3",
     "vite": "^8.0.10",

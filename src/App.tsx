@@ -63,10 +63,14 @@ import {
   removeNode,
   setHref,
   setExternal,
+  detectSiteUrls,
+  applySiteUrl,
+  isValidSiteUrl,
   type SitemapNode,
   type RootMode,
   type HrefMode,
 } from './lib/sitemap'
+import { Combobox } from '@base-ui/react/combobox'
 import {
   ACCENT_PRESETS,
   DEFAULT_ACCENT,
@@ -95,6 +99,19 @@ interface State {
   // Ids of nodes the user added (vs. parsed from the pasted sitemap). Drives
   // delete-button visibility and auto-opens the URL editor on those rows.
   addedIds: Set<string>
+  // Origin (e.g. 'https://www.army.edu/') that defines what counts as an
+  // internal link. Drives the per-node `external` flag via applySiteUrl.
+  // Only updates when the user commits a valid value from SiteUrlField —
+  // the draft (typed but not yet valid) lives inside SiteUrlField so App
+  // doesn't re-render on every keystroke.
+  siteUrl: string
+  // Read-only snapshot of the most-common detected origin on the last paste.
+  // Used to populate the "Detected site URL" message and the revert button.
+  // Never changes when the user edits siteUrl.
+  detectedSiteUrl: string
+  // All distinct origins from the last paste, ranked by frequency desc.
+  // Populates the combobox dropdown.
+  detectedSiteUrls: string[]
 }
 
 const INITIAL_STATE: State = {
@@ -111,6 +128,9 @@ const INITIAL_STATE: State = {
   parseError: '',
   previewCurrentPath: null,
   addedIds: new Set(),
+  siteUrl: '',
+  detectedSiteUrl: '',
+  detectedSiteUrls: [],
 }
 
 // ── Asset download (panel 4) ─────────────────────────────────────────────────
@@ -162,7 +182,7 @@ export default function App() {
   const [copied, setCopied] = useState(false)
   const pasteRef = useRef<HTMLDivElement | null>(null)
 
-  const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, accentColor, pageCount, maxDepth, parseError, previewCurrentPath, addedIds } = state
+  const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, accentColor, pageCount, maxDepth, parseError, previewCurrentPath, addedIds, siteUrl, detectedSiteUrl, detectedSiteUrls } = state
 
   const hasForest = forest.length > 0
   const hasPickedRoot = rootId !== null && findNode(forest, rootId) !== null
@@ -221,13 +241,19 @@ export default function App() {
       }))
       return
     }
+    const detectedList = detectSiteUrls(result.forest)
+    const detected = detectedList[0] ?? ''
+    const forest = applySiteUrl(result.forest, detected)
     setState(s => ({
       ...s,
-      forest: result.forest,
+      forest,
       rootId: null,
       pageCount: result.pageCount,
       maxDepth: result.maxDepth,
       parseError: '',
+      siteUrl: detected,
+      detectedSiteUrl: detected,
+      detectedSiteUrls: detectedList,
     }))
   }
 
@@ -345,6 +371,21 @@ export default function App() {
   const handleSetExternal = (id: string, external: boolean) =>
     setState(s => ({ ...s, forest: setExternal(s.forest, id, external) }))
 
+  // Called by SiteUrlField when its local draft becomes valid (debounced).
+  // App takes the value as-is and re-classifies the forest. Invalid drafts
+  // never reach here — they stay in the child's local state.
+  const handleSiteUrlCommit = (value: string) => {
+    setState(s => ({ ...s, siteUrl: value, forest: applySiteUrl(s.forest, value) }))
+  }
+
+  const handleRevertSiteUrl = () => {
+    setState(s => ({
+      ...s,
+      siteUrl: s.detectedSiteUrl,
+      forest: applySiteUrl(s.forest, s.detectedSiteUrl),
+    }))
+  }
+
   const handleHeaderText = (val: string) =>
     setState(s => ({ ...s, headerText: val }))
 
@@ -439,6 +480,11 @@ export default function App() {
                   ✓ Captured {pageCount} page{pageCount === 1 ? '' : 's'} across {maxDepth} level{maxDepth === 1 ? '' : 's'}.
                 </p>
               )}
+              {hasForest && detectedSiteUrl && (
+                <p className="mt-1 text-xs text-green-700 font-medium">
+                  ✓ Detected site URL <code className="font-mono">{detectedSiteUrl}</code>
+                </p>
+              )}
               {parseError && (
                 <p className="mt-2 text-xs text-red-600">{parseError}</p>
               )}
@@ -464,11 +510,20 @@ export default function App() {
               </div>
 
               {hasPickedRoot && (
+                <button
+                  onClick={() => handleSetRoot(null)}
+                  className="mt-2 text-xs text-blue-600 hover:text-blue-800 underline"
+                >
+                  Use entire sitemap
+                </button>
+              )}
+
+              {hasPickedRoot && (
                 <fieldset className="mt-3">
                   <legend className="text-xs font-medium text-gray-700 mb-1">Root display</legend>
                   <div className="space-y-1">
                     {([
-                      ['sibling', 'Show root as sibling (default)', 'Root appears as the first item, with its children as siblings, with "Home" appended.'],
+                      ['sibling', 'Show root as sibling (default)', 'Root appears as the first item with "Home" appended and its children as siblings.'],
                       ['hide', 'Omit root', 'Root is omitted; only its children appear.'],
                       ['parent', 'Show root as parent', 'Root appears as a parent item, with its children collapsed.'],
                       ['parent-expanded', 'Show root as parent (children expanded)', 'Root appears as a parent item, with its children expanded by default.'],
@@ -492,9 +547,18 @@ export default function App() {
                 </fieldset>
               )}
 
-              <fieldset className="mt-3">
-                <legend className="text-xs font-medium text-gray-700 mb-1">Link format</legend>
-                <label className="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
+              <SiteUrlField
+                appliedSiteUrl={siteUrl}
+                detectedSiteUrl={detectedSiteUrl}
+                detectedSiteUrls={detectedSiteUrls}
+                hasForest={hasForest}
+                onCommit={handleSiteUrlCommit}
+                onRevert={handleRevertSiteUrl}
+              />
+
+              <fieldset className="mt-3" disabled={!siteUrl}>
+                <legend className={`text-xs font-medium mb-1 ${siteUrl ? 'text-gray-700' : 'text-gray-400'}`}>Internal link format</legend>
+                <label className={`flex items-start gap-2 text-xs ${siteUrl ? 'text-gray-700 cursor-pointer' : 'text-gray-400 cursor-not-allowed'}`}>
                   <input
                     type="checkbox"
                     checked={hrefMode === 'absolute'}
@@ -502,22 +566,13 @@ export default function App() {
                     className="mt-0.5 shrink-0"
                   />
                   <span>
-                    <span className="font-medium">Include full URLs (protocol + host)</span>
-                    <span className="block text-[11px] text-gray-500">
-                      Off (default): generated hrefs are site-root-relative (e.g. <code>/about/team</code>).
+                    <span className="font-medium">Keep full URL on internal links</span>
+                    <span className={`block text-[11px] ${siteUrl ? 'text-gray-500' : 'text-gray-400'}`}>
+                      Off (default): internal links are stripped to paths (e.g. <code>/about/team</code>). External links always keep their full URL.
                     </span>
                   </span>
                 </label>
               </fieldset>
-
-              {hasPickedRoot && (
-                <button
-                  onClick={() => handleSetRoot(null)}
-                  className="mt-3 text-xs text-blue-600 hover:text-blue-800 underline"
-                >
-                  Use entire sitemap
-                </button>
-              )}
             </div>
 
           </div>
@@ -685,6 +740,144 @@ export default function App() {
         </span>
       </footer>
     </div>
+  )
+}
+
+// ── Site URL field ──────────────────────────────────────────────────────────
+
+// Owns the typed-but-not-yet-applied draft locally so keystrokes don't trigger
+// an App re-render (which would re-walk the forest + regenerate preview every
+// keystroke). Only commits upstream when the draft is valid, debounced so a
+// burst of typing doesn't flood applySiteUrl. When the applied value changes
+// from outside (paste, revert), the draft re-syncs.
+interface SiteUrlFieldProps {
+  appliedSiteUrl: string
+  detectedSiteUrl: string
+  detectedSiteUrls: string[]
+  hasForest: boolean
+  onCommit: (value: string) => void
+  onRevert: () => void
+}
+
+function SiteUrlField({
+  appliedSiteUrl,
+  detectedSiteUrl,
+  detectedSiteUrls,
+  hasForest,
+  onCommit,
+  onRevert,
+}: SiteUrlFieldProps) {
+  const [draft, setDraft] = useState(appliedSiteUrl)
+
+  // Re-sync draft when the applied value changes from outside (new paste,
+  // revert button). The guard prevents resetting the input mid-typing in the
+  // common case where the commit we're hearing back is our own.
+  useEffect(() => {
+    if (appliedSiteUrl !== draft) setDraft(appliedSiteUrl)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appliedSiteUrl])
+
+  // Debounce committing valid drafts so a burst of keystrokes only fires one
+  // applySiteUrl + preview regeneration at the end.
+  const commitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    return () => {
+      if (commitTimeoutRef.current) clearTimeout(commitTimeoutRef.current)
+    }
+  }, [])
+
+  const scheduleCommit = (value: string) => {
+    if (commitTimeoutRef.current) clearTimeout(commitTimeoutRef.current)
+    if (!isValidSiteUrl(value)) return
+    commitTimeoutRef.current = setTimeout(() => {
+      commitTimeoutRef.current = null
+      onCommit(value)
+    }, 250)
+  }
+
+  const handleInputValueChange = (value: string) => {
+    setDraft(value)
+    scheduleCommit(value)
+  }
+
+  // Explicit selection (Enter on a highlighted item, click): commit immediately
+  // and cancel any pending debounced commit.
+  const handleValueChange = (value: string | null) => {
+    if (value == null) return
+    if (commitTimeoutRef.current) {
+      clearTimeout(commitTimeoutRef.current)
+      commitTimeoutRef.current = null
+    }
+    setDraft(value)
+    if (isValidSiteUrl(value)) onCommit(value)
+  }
+
+  const draftInvalid = hasForest && !isValidSiteUrl(draft)
+
+  return (
+    <fieldset className="mt-3">
+      <legend className="text-xs font-medium text-gray-700 mb-1">Site URL</legend>
+      <Combobox.Root
+        items={detectedSiteUrls}
+        inputValue={draft}
+        onInputValueChange={handleInputValueChange}
+        onValueChange={handleValueChange}
+        autoHighlight
+        openOnInputClick={false}
+      >
+        <div className="relative">
+          <Combobox.Input
+            placeholder="https://www.example.edu/"
+            className="w-full text-xs px-2 py-1 pr-6 border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+          {detectedSiteUrls.length > 0 && (
+            <Combobox.Trigger
+              aria-label="Show detected URLs"
+              className="absolute inset-y-0 right-0 px-1.5 flex items-center text-gray-400 hover:text-gray-600"
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+                <path d="M1 3l4 4 4-4" stroke="currentColor" strokeWidth="1.5" fill="none" />
+              </svg>
+            </Combobox.Trigger>
+          )}
+        </div>
+        <Combobox.Portal>
+          <Combobox.Positioner sideOffset={4} className="z-50">
+            <Combobox.Popup className="w-[var(--anchor-width)] max-h-48 overflow-y-auto bg-white border border-gray-200 rounded shadow-lg text-xs">
+              <Combobox.List>
+                {(item: string) => (
+                  <Combobox.Item
+                    key={item}
+                    value={item}
+                    className="px-2 py-1 cursor-pointer data-[highlighted]:bg-blue-50 data-[selected]:font-medium"
+                  >
+                    {item}
+                  </Combobox.Item>
+                )}
+              </Combobox.List>
+              <Combobox.Empty className="px-2 py-1 text-gray-400">No matches</Combobox.Empty>
+            </Combobox.Popup>
+          </Combobox.Positioner>
+        </Combobox.Portal>
+      </Combobox.Root>
+      {draftInvalid && (
+        <p className="mt-1 text-[11px] text-red-600">
+          Site URL is required. Must be a full URL ending with <code>/</code> (e.g. <code>https://www.example.edu/</code>).
+        </p>
+      )}
+      {detectedSiteUrl && draft !== detectedSiteUrl && (
+        <button
+          type="button"
+          onClick={onRevert}
+          className="mt-1 text-[11px] text-blue-600 hover:text-blue-800 underline"
+        >
+          Revert to most common URL ({detectedSiteUrl})
+        </button>
+      )}
+      <span className="block text-[11px] text-gray-500 mt-1">
+        Links not starting with this URL are treated as external and will open in a new tab.
+      </span>
+    </fieldset>
   )
 }
 

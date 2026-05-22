@@ -424,6 +424,68 @@ export function setExternal(roots: SitemapNode[], id: string, external: boolean)
   return mapTree(roots, n => n.id === id ? { ...n, external } : n)
 }
 
+// Find every distinct origin in the forest, ranked by frequency descending.
+// Each entry is `origin + '/'` (e.g. 'https://www.army.edu/'). Ties broken by
+// first-encountered in tree order. Returns [] if nothing parseable.
+export function detectSiteUrls(roots: SitemapNode[]): string[] {
+  const counts = new Map<string, number>()
+  const order: string[] = []
+  function walk(nodes: SitemapNode[]): void {
+    for (const n of nodes) {
+      if (n.href) {
+        try {
+          const origin = new URL(n.href).origin
+          if (!counts.has(origin)) order.push(origin)
+          counts.set(origin, (counts.get(origin) ?? 0) + 1)
+        } catch {
+          // not an absolute URL — ignore
+        }
+      }
+      walk(n.children)
+    }
+  }
+  walk(roots)
+  // Stable sort: order[] preserves first-encountered, sort by count desc keeps
+  // ties in original order.
+  return order
+    .slice()
+    .sort((a, b) => (counts.get(b) ?? 0) - (counts.get(a) ?? 0))
+    .map(o => o + '/')
+}
+
+// Convenience wrapper: the single most common origin (with trailing /) or ''.
+export function detectSiteUrl(roots: SitemapNode[]): string {
+  return detectSiteUrls(roots)[0] ?? ''
+}
+
+// A Site URL is required and must parse via new URL() AND end with '/'.
+// Blank is invalid because without a site URL, applySiteUrl marks every link
+// as internal, and `Internal link format` would then strip the host off
+// cross-origin hrefs and break them. The trailing slash prevents the
+// partial-host bug: 'https://www.army' is a prefix of both
+// 'https://www.army.edu/' and 'https://www.armywarcollege.edu/'; requiring a
+// trailing slash means a typo matches nothing instead of silently mis-classifying.
+export function isValidSiteUrl(value: string): boolean {
+  if (value === '') return false
+  if (!value.endsWith('/')) return false
+  try {
+    new URL(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// Set `external` on every node with a non-empty href based on whether the href
+// starts with `siteUrl`. Nodes with empty hrefs (plain-text rows) are left
+// alone — they don't render as anchors, so the flag has no meaning for them.
+export function applySiteUrl(roots: SitemapNode[], siteUrl: string): SitemapNode[] {
+  return mapTree(roots, n => {
+    if (n.href.trim() === '') return n
+    return { ...n, external: !n.href.startsWith(siteUrl) }
+  })
+}
+
 // ── Output ──────────────────────────────────────────────────────────────────
 
 export type RootMode = 'parent' | 'parent-expanded' | 'hide' | 'sibling'
