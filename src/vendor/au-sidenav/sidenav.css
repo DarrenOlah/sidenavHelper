@@ -89,6 +89,19 @@
   color: #000;
 }
 
+/* Plain-text grouping rows are italicized to distinguish them from real
+ * links at a glance. Parents (those with a sublist) are clickable to expand
+ * via sidenav.js, so the cursor reflects that; leaf plain-text rows stay
+ * non-interactive. */
+.au-sidenav .au-sidenav__list .au-sidenav__text {
+  font-style: italic;
+  letter-spacing: 0.03em;
+  color: #565c65;
+}
+.au-sidenav .au-sidenav__list .au-sidenav__item:has(> .au-sidenav__sublist) > .au-sidenav__text {
+  cursor: pointer;
+}
+
 /* Show / hide submenus based on the modifier on the parent <li>.
  * Default-visible so the menu degrades to a fully-expanded tree without JS. */
 .au-sidenav .au-sidenav__item > .au-sidenav__sublist {

@@ -16,6 +16,7 @@
     list:         "au-sidenav__list",
     sublist:      "au-sidenav__sublist",
     item:         "au-sidenav__item",
+    text:         "au-sidenav__text",
     toggle:       "au-sidenav__toggle",
     mobileToggle: "au-sidenav__mobile-toggle",
     mobileCollapsed: "au-sidenav--mobile-collapsed",
@@ -169,11 +170,23 @@
           mbtn.setAttribute("aria-expanded", nowCollapsed ? "false" : "true");
           return;
         }
+        // Toggle fires from the carat button OR from a plain-text label row.
+        // Plain-text rows act as visual groupings (no href), so clicking
+        // anywhere on the row should expand/collapse — only the carat is too
+        // small a target. Leaf plain-text rows (no sublist) fall through.
         var btn = e.target.closest("." + CLS.toggle);
-        if (!btn || !nav.contains(btn)) return;
-        e.preventDefault();
-        var li = btn.closest("." + CLS.item);
+        var textLabel = e.target.closest("." + CLS.text);
+        var li = null;
+        if (btn && nav.contains(btn)) {
+          li = btn.closest("." + CLS.item);
+        } else if (textLabel && nav.contains(textLabel)) {
+          var parentLi = textLabel.closest("." + CLS.item);
+          if (parentLi && parentLi.querySelector(":scope > ." + CLS.sublist)) {
+            li = parentLi;
+          }
+        }
         if (!li) return;
+        e.preventDefault();
         var isExpanded = li.classList.contains(CLS.expanded);
         if (isExpanded) {
           collapseDescendants(li);
