@@ -9,6 +9,7 @@ import {
   demoteNode,
   selectSubtree,
   addChild,
+  addFirstChild,
   addSiblingAfter,
   removeNode,
   setHref,
@@ -195,6 +196,29 @@ describe('addChild', () => {
     const forest = buildSampleForest()
     const original = JSON.stringify(forest)
     addChild(forest, 'a', leaf('new', 'New'))
+    expect(JSON.stringify(forest)).toBe(original)
+  })
+})
+
+describe('addFirstChild', () => {
+  it('prepends as the first child of a named parent', () => {
+    const forest = buildSampleForest()
+    const node = leaf('new', 'New')
+    const next = addFirstChild(forest, 'a', node)
+    expect(findNode(next, 'a')?.children.map(c => c.id)).toEqual(['new', 'a1', 'a2'])
+  })
+
+  it('prepends as the first child of a parent with no existing children', () => {
+    const forest = buildSampleForest()
+    const node = leaf('new', 'New')
+    const next = addFirstChild(forest, 'b', node)
+    expect(findNode(next, 'b')?.children.map(c => c.id)).toEqual(['new'])
+  })
+
+  it('does not mutate the input forest', () => {
+    const forest = buildSampleForest()
+    const original = JSON.stringify(forest)
+    addFirstChild(forest, 'a', leaf('new', 'New'))
     expect(JSON.stringify(forest)).toBe(original)
   })
 })

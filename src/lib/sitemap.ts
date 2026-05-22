@@ -387,6 +387,12 @@ export function addChild(roots: SitemapNode[], parentId: string | null, node: Si
   return mapTree(roots, n => n.id === parentId ? { ...n, children: [...n.children, node] } : n)
 }
 
+// Insert `node` as the first child of `parentId` so it renders directly below
+// the parent label rather than at the bottom of an existing children list.
+export function addFirstChild(roots: SitemapNode[], parentId: string, node: SitemapNode): SitemapNode[] {
+  return mapTree(roots, n => n.id === parentId ? { ...n, children: [node, ...n.children] } : n)
+}
+
 // Insert `node` immediately after the sibling identified by `siblingId`,
 // regardless of where in the tree that sibling lives.
 export function addSiblingAfter(roots: SitemapNode[], siblingId: string, node: SitemapNode): SitemapNode[] {

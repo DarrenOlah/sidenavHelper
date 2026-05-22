@@ -60,6 +60,7 @@ import {
   findNode,
   makeNode,
   addChild,
+  addFirstChild,
   removeNode,
   setHref,
   setExternal,
@@ -345,7 +346,7 @@ export default function App() {
       const node = makeNode()
       const nextAdded = new Set(s.addedIds)
       nextAdded.add(node.id)
-      return { ...s, forest: addChild(s.forest, parentId, node), addedIds: nextAdded }
+      return { ...s, forest: addFirstChild(s.forest, parentId, node), addedIds: nextAdded }
     })
 
   // Adds a sibling at the level identified by parentId. The 'sibling' rootMode
