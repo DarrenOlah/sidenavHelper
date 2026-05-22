@@ -784,6 +784,7 @@ function SiteUrlField({
   onRevert,
 }: SiteUrlFieldProps) {
   const [draft, setDraft] = useState(appliedSiteUrl)
+  const { contains } = Combobox.useFilter({ sensitivity: 'base' })
 
   // Re-sync draft when the applied value changes from outside (new paste,
   // revert button). The guard prevents resetting the input mid-typing in the
@@ -840,6 +841,9 @@ function SiteUrlField({
         onValueChange={handleValueChange}
         autoHighlight
         openOnInputClick={false}
+        filter={(itemValue, query) =>
+          query === appliedSiteUrl ? true : contains(itemValue, query)
+        }
       >
         <div className="relative">
           <Combobox.Input
