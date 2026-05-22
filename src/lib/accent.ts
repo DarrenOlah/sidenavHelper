@@ -30,17 +30,17 @@ export function applyAccentColor(css: string, color: string): string {
   return css.replace(ACCENT_MARKER, `background-color: ${color}; /* accent */`)
 }
 
-// Accepts #RGB, #RRGGBB, RGB, or RRGGBB (case-insensitive). Returns the
-// normalized 6-char uppercase form with a leading #, or null for any input
-// that isn't a clean hex color. We reject anything else so user typing can't
-// inject CSS syntax into the output stylesheet.
+// Accepts #RRGGBB or RRGGBB (case-insensitive). Returns the normalized 6-char
+// uppercase form with a leading #, or null for any input that isn't a clean
+// 6-digit hex color. We reject anything else so user typing can't inject CSS
+// syntax into the output stylesheet.
+//
+// 3-digit shorthand is intentionally rejected: while typing a 6-digit code,
+// a 3-char prefix like "FFC" would otherwise be eagerly expanded to #FFFFCC
+// and committed upstream, snapping the preview to a wrong color mid-keystroke.
 export function normalizeHex(input: string): string | null {
   if (typeof input !== 'string') return null
   const trimmed = input.trim().replace(/^#/, '')
-  if (/^[0-9a-fA-F]{3}$/.test(trimmed)) {
-    const [r, g, b] = trimmed
-    return ('#' + r + r + g + g + b + b).toUpperCase()
-  }
   if (/^[0-9a-fA-F]{6}$/.test(trimmed)) {
     return ('#' + trimmed).toUpperCase()
   }

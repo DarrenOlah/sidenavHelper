@@ -49,17 +49,18 @@ describe('normalizeHex', () => {
     expect(normalizeHex('#FFCC33')).toBe('#FFCC33')
   })
 
-  it('expands 3-char hex to 6-char uppercase', () => {
-    expect(normalizeHex('#fff')).toBe('#FFFFFF')
-    expect(normalizeHex('f0a')).toBe('#FF00AA')
+  it('rejects 3-char shorthand so mid-typing prefixes do not snap the preview', () => {
+    expect(normalizeHex('#fff')).toBeNull()
+    expect(normalizeHex('f0a')).toBeNull()
+    expect(normalizeHex('#abc')).toBeNull()
   })
 
   it('trims surrounding whitespace', () => {
-    expect(normalizeHex('  #abc  ')).toBe('#AABBCC')
+    expect(normalizeHex('  #aabbcc  ')).toBe('#AABBCC')
   })
 
   it('rejects non-hex characters', () => {
-    expect(normalizeHex('#xyz')).toBeNull()
+    expect(normalizeHex('#xyzxyz')).toBeNull()
     expect(normalizeHex('#12345g')).toBeNull()
   })
 
@@ -68,6 +69,7 @@ describe('normalizeHex', () => {
     expect(normalizeHex('#')).toBeNull()
     expect(normalizeHex('#12')).toBeNull()
     expect(normalizeHex('#1234')).toBeNull()
+    expect(normalizeHex('#12345')).toBeNull()
     expect(normalizeHex('#1234567')).toBeNull()
   })
 

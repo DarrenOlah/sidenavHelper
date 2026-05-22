@@ -920,6 +920,23 @@ function AccentColorPicker({ value, onChange }: AccentColorPickerProps) {
     if (normalized) onChange(normalized)
   }
 
+  // The native <input type="color"> fires onChange continuously while the user
+  // drags inside the color wheel. Each fire re-runs the parent's outputHtml
+  // memo (full sidenav.css regex replace) and re-applies the preview <style>,
+  // which gets noticeably laggy. Debounce the commit so we coalesce a burst of
+  // events into a single upstream update once the user pauses.
+  const pickerDebounceRef = useRef<number | null>(null)
+  useEffect(() => () => {
+    if (pickerDebounceRef.current !== null) window.clearTimeout(pickerDebounceRef.current)
+  }, [])
+  const handlePickerChange = (color: string) => {
+    if (pickerDebounceRef.current !== null) window.clearTimeout(pickerDebounceRef.current)
+    pickerDebounceRef.current = window.setTimeout(() => {
+      pickerDebounceRef.current = null
+      onChange(color.toUpperCase())
+    }, 80)
+  }
+
   const activePreset = ACCENT_PRESETS.find(p => p.hex.toUpperCase() === value.toUpperCase())
   const isValidDraft = normalizeHex(draft) !== null
 
@@ -966,7 +983,7 @@ function AccentColorPicker({ value, onChange }: AccentColorPickerProps) {
         <input
           type="color"
           value={normalizeHex(value) ?? '#FFCC33'}
-          onChange={e => onChange(e.target.value.toUpperCase())}
+          onChange={e => handlePickerChange(e.target.value)}
           aria-label="Pick a custom color"
           className="w-8 h-8 rounded border border-gray-300 cursor-pointer"
         />
