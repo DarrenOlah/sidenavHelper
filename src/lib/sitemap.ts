@@ -517,9 +517,14 @@ function renderItem(
   // safeHref returns '#' for unsafe schemes too — we still emit those as <a>
   // (going to '#') so the user can see the row exists and is broken.
   const isPlainText = node.href.trim() === ''
+  // External links open in a new tab. rel="noopener noreferrer" prevents the
+  // opened page from accessing window.opener or leaking the referrer.
+  const anchorAttrs = node.external
+    ? ` target="_blank" rel="noopener noreferrer"`
+    : ''
   const linkHtml = isPlainText
     ? `<span class="au-sidenav__text">${label}</span>`
-    : `<a href="${href}">${label}</a>`
+    : `<a href="${href}"${anchorAttrs}>${label}</a>`
 
   const includedChildren = node.children.filter(c => c.included)
 

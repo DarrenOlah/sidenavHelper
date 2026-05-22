@@ -272,6 +272,22 @@ describe('generateSidenavHtml', () => {
       expect(html).toContain('href="/docs"')
       expect(html).not.toContain('other.example.com')
     })
+
+    it('adds target="_blank" rel="noopener noreferrer" to anchors flagged external', () => {
+      const node: SitemapNode = {
+        id: '1', href: 'https://other.example.com/docs', defaultLabel: 'Docs', label: 'Docs',
+        included: true, children: [], external: true,
+      }
+      const html = generateSidenavHtml([node])
+      expect(html).toContain('target="_blank"')
+      expect(html).toContain('rel="noopener noreferrer"')
+    })
+
+    it('omits target/rel on anchors not flagged external', () => {
+      const html = generateSidenavHtml([leaf('1', 'A', '/foo')])
+      expect(html).not.toContain('target="_blank"')
+      expect(html).not.toContain('rel="noopener noreferrer"')
+    })
   })
 
   describe('plain-text items (empty href)', () => {
