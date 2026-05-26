@@ -1,10 +1,32 @@
 import { describe, it, expect } from 'vitest'
-import { parseSitemapHtml } from './sitemap'
+import { parseSitemapHtml, generateSidenavHtml } from './sitemap'
 
 describe('parseSitemapHtml', () => {
   it('returns an empty forest for empty input', () => {
-    expect(parseSitemapHtml('')).toEqual({ forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '' })
-    expect(parseSitemapHtml('   ')).toEqual({ forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '' })
+    expect(parseSitemapHtml('')).toEqual({ forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '', isAuSidenavOutput: false })
+    expect(parseSitemapHtml('   ')).toEqual({ forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '', isAuSidenavOutput: false })
+  })
+
+  describe('isAuSidenavOutput', () => {
+    it('is true for output produced by generateSidenavHtml (round-trip)', () => {
+      const seed = parseSitemapHtml(`<ul><li><a href="/a/">A</a><ul><li><a href="/a/b/">B</a></li></ul></li></ul>`)
+      const html = generateSidenavHtml(seed.forest)
+      expect(parseSitemapHtml(html).isAuSidenavOutput).toBe(true)
+    })
+
+    it('is true when only the .au-sidenav__sublist marker is present', () => {
+      const html = `<ul class="au-sidenav__list"><li><a href="/a/">A</a><ul class="au-sidenav__sublist"><li><a href="/a/b/">B</a></li></ul></li></ul>`
+      expect(parseSitemapHtml(html).isAuSidenavOutput).toBe(true)
+    })
+
+    it('is false for a plain site-index <ul>/<li>/<a> tree', () => {
+      const html = `<ul><li><a href="/a/">A</a><ul><li><a href="/a/b/">B</a></li></ul></li></ul>`
+      expect(parseSitemapHtml(html).isAuSidenavOutput).toBe(false)
+    })
+
+    it('is false for empty input', () => {
+      expect(parseSitemapHtml('').isAuSidenavOutput).toBe(false)
+    })
   })
 
   describe('detectedHeaderText', () => {

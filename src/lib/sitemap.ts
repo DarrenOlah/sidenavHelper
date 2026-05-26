@@ -28,6 +28,10 @@ export interface ParseResult {
   // round-trip a previously-generated menu's custom header back into the
   // "Header text" field.
   detectedHeaderText: string
+  // True when the parsed markup carries au-sidenav class markers — i.e. the
+  // pasted HTML is output from a previously-generated menu, not a fresh site
+  // index. Enables the Compare-with-Site-Index flow in the App.
+  isAuSidenavOutput: boolean
 }
 
 // ── Parsing ─────────────────────────────────────────────────────────────────
@@ -51,13 +55,17 @@ export function parseSitemapHtml(html: string): ParseResult {
   resetIds()
 
   if (!html || !html.trim()) {
-    return { forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '' }
+    return { forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '', isAuSidenavOutput: false }
   }
 
   const doc = new DOMParser().parseFromString(html, 'text/html')
   const baseHref = doc.querySelector('base')?.getAttribute('href') ?? undefined
   const headerEl = doc.querySelector('.au-sidenav__header')
   const detectedHeaderText = (headerEl?.textContent || '').replace(/\s+/g, ' ').trim()
+  const isAuSidenavOutput =
+    doc.querySelector('.au-sidenav') !== null ||
+    doc.querySelector('.au-sidenav__sublist') !== null ||
+    doc.querySelector('.au-sidenav__list') !== null
 
   // Find candidate top-level <ul> elements: every <ul> that is NOT contained
   // inside another <ul>. This covers both "selection includes the wrapper"
@@ -72,14 +80,14 @@ export function parseSitemapHtml(html: string): ParseResult {
     const forest = links
       .map(a => buildLeaf(a as HTMLAnchorElement, baseHref))
       .filter((n): n is SitemapNode => n !== null)
-    return summarize(forest, detectedHeaderText)
+    return summarize(forest, detectedHeaderText, isAuSidenavOutput)
   }
 
   const forest: SitemapNode[] = []
   for (const ul of topLists) {
     forest.push(...listToNodes(ul, baseHref))
   }
-  return summarize(forest, detectedHeaderText)
+  return summarize(forest, detectedHeaderText, isAuSidenavOutput)
 }
 
 function listToNodes(ul: Element, baseHref: string | undefined): SitemapNode[] {
@@ -223,7 +231,7 @@ function resolveHref(raw: string, baseHref: string | undefined): string {
   }
 }
 
-function summarize(forest: SitemapNode[], detectedHeaderText = ''): ParseResult {
+function summarize(forest: SitemapNode[], detectedHeaderText = '', isAuSidenavOutput = false): ParseResult {
   let pageCount = 0
   let maxDepth = 0
   function walk(nodes: SitemapNode[], depth: number): void {
@@ -234,7 +242,7 @@ function summarize(forest: SitemapNode[], detectedHeaderText = ''): ParseResult 
     }
   }
   walk(forest, 1)
-  return { forest, pageCount, maxDepth, detectedHeaderText }
+  return { forest, pageCount, maxDepth, detectedHeaderText, isAuSidenavOutput }
 }
 
 // ── Tree mutations (immutable) ──────────────────────────────────────────────
@@ -385,6 +393,27 @@ export function selectSubtree(roots: SitemapNode[], id: string): SitemapNode[] {
 // to setState.
 export function makeNode(label = 'New page', href = ''): SitemapNode {
   return { id: nextId(), href, defaultLabel: label, label, included: true, children: [] }
+}
+
+// Advance the internal id counter past the largest numeric id in the given
+// forests. Needed when a second parse happens (e.g. the Compare-with-Site-Index
+// flow parses a fresh site index after the menu was already parsed) — without
+// this, the counter resets to 0 and subsequent makeNode() calls would generate
+// ids that collide with existing menu nodes.
+export function ensureIdsPast(...forests: SitemapNode[][]): void {
+  let max = __idCounter
+  function walk(nodes: SitemapNode[]): void {
+    for (const n of nodes) {
+      const m = /^n(\d+)$/.exec(n.id)
+      if (m) {
+        const v = parseInt(m[1], 10)
+        if (v > max) max = v
+      }
+      walk(n.children)
+    }
+  }
+  for (const f of forests) walk(f)
+  __idCounter = max
 }
 
 // Append `node` as the last child of `parentId`. Pass `parentId === null` to
