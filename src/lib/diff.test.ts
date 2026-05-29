@@ -2,6 +2,9 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import {
   diffForests,
   applyDiff,
+  detectMenuScope,
+  filterSiteIndexByScope,
+  detectSiblingModeRoot,
   __resetCloneCounter,
   type DiffEntry,
 } from './diff'
@@ -273,5 +276,389 @@ describe('applyDiff', () => {
     }
     const after = applyDiff(menu, stale)
     expect(after).toBe(menu)
+  })
+})
+
+describe('detectMenuScope', () => {
+  it('returns empty string for an empty forest', () => {
+    expect(detectMenuScope([])).toBe('')
+  })
+
+  it('returns the common prefix when all hrefs share one', () => {
+    const menu = [
+      n('r', '/programs/', 'Home'),
+      n('a', '/programs/a', 'A'),
+      n('b', '/programs/b/x', 'BX'),
+    ]
+    expect(detectMenuScope(menu)).toBe('programs')
+  })
+
+  it('returns the page itself for a single-page menu', () => {
+    expect(detectMenuScope([n('a', '/programs/a', 'A')])).toBe('programs/a')
+  })
+
+  it('returns empty when top-level branches differ', () => {
+    expect(detectMenuScope([n('a', '/a', 'A'), n('b', '/b', 'B')])).toBe('')
+  })
+
+  it('ignores external links when computing the scope', () => {
+    const menu = [
+      n('a', '/programs/a', 'A'),
+      { ...n('ext', 'https://other.example.com/x', 'Other'), external: true },
+      n('b', '/programs/b', 'B'),
+    ]
+    expect(detectMenuScope(menu)).toBe('programs')
+  })
+
+  it('ignores empty-href categories when computing the scope', () => {
+    const menu = [
+      cat('cat', 'Resources', []),
+      n('a', '/programs/a', 'A'),
+      n('b', '/programs/b', 'B'),
+    ]
+    expect(detectMenuScope(menu)).toBe('programs')
+  })
+
+  it('treats segments as atomic (no substring matching)', () => {
+    // 'programs-a' and 'programs-b' are different segments — no shared prefix.
+    expect(detectMenuScope([n('a', '/programs-a', 'A'), n('b', '/programs-b', 'B')])).toBe('')
+  })
+
+  it('uses path-only hrefs even when applySiteUrl misclassified them as external', () => {
+    // The USAWC bug: a menu with mostly relative '/USAWC-AFPIMS/...' paths
+    // plus a few absolute off-site links. detectSiteUrls picks one of the
+    // off-site origins as dominant; applySiteUrl then marks every relative
+    // path as external. Without the path-only fallback, scope detection would
+    // run only on the two off-site links and return ''.
+    const menu = [
+      { ...n('home', '/usawc-afpims/', 'Home'), external: true },
+      { ...n('about', '/usawc-afpims/about-us/', 'About'), external: true },
+      { ...n('strat', '/usawc-afpims/strategic-leadership/', 'Strategic'), external: true },
+      { ...n('carl', '/usawc-afpims/carlisle-experience/', 'Carlisle'), external: true },
+      { ...n('ext', 'https://press.armywarcollege.edu/', 'Press'), external: false },
+    ]
+    expect(detectMenuScope(menu)).toBe('usawc-afpims')
+  })
+
+  it('tolerates a minority outlier (USAWC /Portals/... in a /USAWC-AFPIMS/* menu)', () => {
+    // Majority-voting allows one off-prefix internal link (an Academic Program
+    // Guide PDF in /Portals/) to coexist with ~50 in-prefix items. The old
+    // LCP algorithm would have returned '' here.
+    const menu = [
+      n('home', '/usawc-afpims/', 'Home'),
+      n('a', '/usawc-afpims/about/', 'About'),
+      n('b', '/usawc-afpims/strategic-leadership/', 'Strategic'),
+      n('c', '/usawc-afpims/carlisle-experience/', 'Carlisle'),
+      n('pdf', '/portals/153/documents/usawc/registrar/guide.pdf', 'Guide'),
+    ]
+    expect(detectMenuScope(menu)).toBe('usawc-afpims')
+  })
+
+  it('returns empty when no segment has a strict majority', () => {
+    // Two equally-sized branches with no clear winner.
+    const menu = [
+      n('a1', '/programs/x', 'X'),
+      n('a2', '/programs/y', 'Y'),
+      n('b1', '/about/p', 'P'),
+      n('b2', '/about/q', 'Q'),
+    ]
+    expect(detectMenuScope(menu)).toBe('')
+  })
+})
+
+describe('filterSiteIndexByScope', () => {
+  it('returns the site forest unchanged when scope is empty', () => {
+    const site = [n('a', '/a', 'A')]
+    expect(filterSiteIndexByScope(site, '', [])).toBe(site)
+  })
+
+  it('returns [scopeRoot] when the menu also has the scope root', () => {
+    const site = [
+      n('p', '/programs/', 'Programs', [
+        n('p1', '/programs/a', 'A'),
+        n('p2', '/programs/b', 'B'),
+      ]),
+      n('other', '/about', 'About'),
+    ]
+    const menu = [n('mp', '/programs/', 'Programs Home')]
+    const filtered = filterSiteIndexByScope(site, 'programs', menu)
+    expect(filtered).toHaveLength(1)
+    expect(filtered[0].id).toBe('p')
+  })
+
+  it('returns scopeRoot.children when the menu does NOT have the scope root', () => {
+    const site = [
+      n('p', '/programs/', 'Programs', [
+        n('p1', '/programs/a', 'A'),
+        n('p2', '/programs/b', 'B'),
+      ]),
+    ]
+    // Menu has only the root's children (rootMode='hide' shape).
+    const menu = [n('a', '/programs/a', 'A'), n('b', '/programs/b', 'B')]
+    const filtered = filterSiteIndexByScope(site, 'programs', menu)
+    expect(filtered.map(f => f.id)).toEqual(['p1', 'p2'])
+  })
+
+  it('falls back to the full site forest when scope is not found', () => {
+    const site = [n('a', '/a', 'A')]
+    const filtered = filterSiteIndexByScope(site, 'programs', [n('m', '/programs/a', 'A')])
+    expect(filtered).toBe(site)
+  })
+
+  it('matches across relative menu hrefs and absolute site-index hrefs', () => {
+    // The user's real-world case: a sibling-mode menu generated in
+    // site-root-relative mode (paths like '/AMSC/News/') compared against a
+    // freshly-pasted site index whose hrefs are absolute
+    // ('https://armyuniversity.army.afpims.mil/AMSC/News/'). Before the fix,
+    // matching used host-inclusive normalization so the two forms never
+    // collided — every menu page surfaced as 'removed' and every site page
+    // as 'added', and the scope filter fell back to the full site forest.
+    const menu = [
+      n('home', '/AMSC/', 'AMSC Home', [
+        n('news', '/AMSC/News/', 'News'),
+        n('about', '/AMSC/About/', 'About', [
+          n('hist', '/AMSC/About/History/', 'History'),
+        ]),
+      ]),
+    ]
+    const site = [
+      n('sh', 'https://example.com/', 'Home'),
+      n('snews', 'https://example.com/News/', 'News'),
+      n('samsc', 'https://example.com/AMSC/', 'AMSC', [
+        n('snews2', 'https://example.com/AMSC/News/', 'News'),
+        n('sabout', 'https://example.com/AMSC/About/', 'About', [
+          n('shist', 'https://example.com/AMSC/About/History/', 'History'),
+          n('snew', 'https://example.com/AMSC/About/Mission/', 'Mission'),
+        ]),
+      ]),
+    ]
+    const scope = detectMenuScope(menu)
+    expect(scope).toBe('amsc')
+    const scoped = filterSiteIndexByScope(site, scope, menu)
+    // Scope should have found the AMSC node in the site index despite the
+    // absolute-URL form; menu has /AMSC/ at top → returns [scopeRoot].
+    expect(scoped).toHaveLength(1)
+    expect(scoped[0].label).toBe('AMSC')
+    const r = diffForests(menu, scoped)
+    // The only diff should be the new /AMSC/About/Mission page.
+    expect(r.entries.filter(e => e.kind === 'removed')).toEqual([])
+    expect(r.entries.filter(e => e.kind === 'moved')).toEqual([])
+    const added = r.entries.filter(e => e.kind === 'added')
+    expect(added).toHaveLength(1)
+    if (added[0].kind !== 'added') throw new Error('bad')
+    expect(added[0].siteNode.label).toBe('Mission')
+  })
+
+  it('drops off-scope added entries from a full diff', () => {
+    // Menu was built from /programs/ root (hide mode — root omitted). Site
+    // index includes /programs/ AND /about/. Without scoping, /about would
+    // appear as added; /programs/c (a new page in the branch) is the only
+    // added entry that should survive scoping.
+    const menu = [n('a', '/programs/a', 'A'), n('b', '/programs/b', 'B')]
+    const site = [
+      n('p', '/programs/', 'Programs', [
+        n('a', '/programs/a', 'A'),
+        n('b', '/programs/b', 'B'),
+        n('c', '/programs/c', 'C'),
+      ]),
+      n('ab', '/about', 'About'),
+    ]
+    const scope = detectMenuScope(menu)
+    const scoped = filterSiteIndexByScope(site, scope, menu)
+    const r = diffForests(menu, scoped)
+    const addedHrefs = r.entries
+      .filter(e => e.kind === 'added')
+      .map(e => (e.kind === 'added' ? e.siteNode.href : ''))
+    expect(addedHrefs).toEqual(['/programs/c']) // /about and /programs/ root omitted
+  })
+})
+
+describe('detectSiblingModeRoot', () => {
+  it('returns null for an empty forest', () => {
+    expect(detectSiblingModeRoot([])).toBeNull()
+  })
+
+  it('returns null for a single-node forest', () => {
+    expect(detectSiblingModeRoot([n('a', '/a', 'A')])).toBeNull()
+  })
+
+  it('returns { rootIndex: 0 } for a sibling-mode-shaped forest', () => {
+    const menu = [
+      n('r', '/programs/', 'Programs Home'),
+      n('a', '/programs/a', 'A'),
+      n('b', '/programs/b/x', 'BX'),
+    ]
+    expect(detectSiblingModeRoot(menu)).toEqual({ rootIndex: 0 })
+  })
+
+  it('returns null when the first node has children (parent mode)', () => {
+    const menu = [
+      n('r', '/programs/', 'Programs', [n('a', '/programs/a', 'A')]),
+      n('b', '/programs/b', 'B'),
+    ]
+    expect(detectSiblingModeRoot(menu)).toBeNull()
+  })
+
+  it('returns null when the first node is external', () => {
+    const menu = [
+      { ...n('r', 'https://other.example.com/', 'Other'), external: true },
+      n('a', '/programs/a', 'A'),
+    ]
+    expect(detectSiblingModeRoot(menu)).toBeNull()
+  })
+
+  it('accepts top-level categories — URL-bearing descendants must be under the root', () => {
+    // Users commonly add a "Resources" category at the top level of a
+    // sibling-mode menu. Detection must still succeed in that case so the
+    // forest is reshaped correctly and compare mode doesn't flag the root's
+    // children as moved.
+    const menu = [
+      n('r', '/programs/', 'Programs Home'),
+      cat('cat', 'Resources', [n('rx', '/programs/x', 'X')]),
+      n('a', '/programs/a', 'A'),
+    ]
+    expect(detectSiblingModeRoot(menu)).toEqual({ rootIndex: 0 })
+  })
+
+  it('returns null when a URL-bearing descendant of a category is off-prefix', () => {
+    // 50/50 split between /programs and /about → scope is empty → reject.
+    const menu = [
+      n('r', '/programs/', 'Programs Home'),
+      cat('cat', 'Resources', [n('off', '/about/x', 'Off')]),
+    ]
+    expect(detectSiblingModeRoot(menu)).toBeNull()
+  })
+
+  it('accepts a single off-prefix outlier when the root prefix dominates', () => {
+    // Real-world USAWC case: many in-prefix items plus one /Portals/ PDF link.
+    // The old strict per-node check rejected this; the new scope-based check
+    // accepts it because the majority of internal hrefs sit under /programs/.
+    const menu = [
+      n('r', '/programs/', 'Programs Home'),
+      n('a', '/programs/a', 'A'),
+      n('b', '/programs/b', 'B'),
+      n('off', '/portals/guide.pdf', 'Guide'),
+    ]
+    expect(detectSiblingModeRoot(menu)).toEqual({ rootIndex: 0 })
+  })
+
+  it('returns null when off-prefix items prevent any segment from dominating', () => {
+    // Equal counts → no majority → no scope → reject.
+    const menu = [
+      n('r', '/programs/', 'Programs Home'),
+      n('off', '/about', 'About'),
+    ]
+    expect(detectSiblingModeRoot(menu)).toBeNull()
+  })
+
+  it('detects sibling-mode even when the first node was misclassified as external', () => {
+    // The USAWC bug: applySiteUrl marks the relative '/usawc-afpims/' root as
+    // external because detectSiteUrls picked an off-site origin. The new
+    // detector relies on detectMenuScope, which uses the path-only fallback,
+    // so detection still succeeds and the menu reshapes correctly.
+    const menu = [
+      { ...n('r', '/usawc-afpims/', 'Home'), external: true },
+      { ...n('a', '/usawc-afpims/about-us/', 'About'), external: true },
+      { ...n('b', '/usawc-afpims/strategic-leadership/', 'Strategic'), external: true },
+    ]
+    expect(detectSiblingModeRoot(menu)).toEqual({ rootIndex: 0 })
+  })
+
+  it('USAWC end-to-end: bad external flags + off-prefix outlier still reshape + diff cleanly', () => {
+    // Reproduces the real bug from the user's screenshot. The pasted menu has:
+    //   - mostly path-only /usawc-afpims/* paths (marked external by applySiteUrl
+    //     because detectSiteUrls picked an off-site origin)
+    //   - one off-prefix /portals/ PDF link
+    //   - one absolute external link to https://usawc.org/
+    // The site index has the full Army University sitemap.
+    // Before the fix: scope was '', filter returned the entire site index, and
+    // the diff showed 100+ false 'added' entries and many false 'moved' entries.
+    const ext = (node: SitemapNode): SitemapNode => ({ ...node, external: true })
+    const menu = [
+      ext(n('home', '/usawc-afpims/', 'Home')),
+      ext(cat('about', 'About Us', [
+        ext(n('ov', '/usawc-afpims/about-us/overview/', 'Overview')),
+        ext(n('mi', '/usawc-afpims/about-us/mission/', 'Mission')),
+      ])),
+      ext(cat('strat', 'Strategic Leadership', [
+        ext(n('dde', '/usawc-afpims/strategic-leadership/dde/', 'DDE')),
+        ext(n('pdf', '/portals/153/documents/usawc/registrar/guide.pdf', 'Guide')),
+      ])),
+      // Genuinely-external link, correctly marked external.
+      ext(n('extlink', 'https://usawc.org/', 'Foundation')),
+    ]
+    const site = [
+      n('shome', 'https://army.afpims.mil/', 'Home'),
+      n('snews', 'https://army.afpims.mil/News/', 'News'),
+      n('samsc', 'https://army.afpims.mil/AMSC/', 'AMSC', [
+        n('samscnews', 'https://army.afpims.mil/AMSC/News/', 'News'),
+      ]),
+      n('susawc', 'https://army.afpims.mil/USAWC-AFPIMS/', 'USAWC-AFPIMS', [
+        cat('saboutcat', 'About Us', [
+          n('sov', 'https://army.afpims.mil/USAWC-AFPIMS/About-Us/Overview/', 'Overview'),
+          n('smi', 'https://army.afpims.mil/USAWC-AFPIMS/About-Us/Mission/', 'Mission'),
+        ]),
+        cat('sstratcat', 'Strategic Leadership', [
+          n('sdde', 'https://army.afpims.mil/USAWC-AFPIMS/Strategic-Leadership/DDE/', 'DDE'),
+        ]),
+      ]),
+    ]
+
+    // Step 1: detectSiblingModeRoot succeeds (was failing — first.external blocked it).
+    const sibling = detectSiblingModeRoot(menu)
+    expect(sibling).toEqual({ rootIndex: 0 })
+
+    // Step 2: reshape — pull Home out, nest the rest under it.
+    const root = menu[sibling!.rootIndex]
+    const rest = menu.filter((_, i) => i !== sibling!.rootIndex)
+    const reshaped = [{ ...root, children: rest }]
+
+    // Step 3: scope detection finds the right prefix.
+    const scope = detectMenuScope(reshaped)
+    expect(scope).toBe('usawc-afpims')
+
+    // Step 4: scoped filter restricts to the USAWC-AFPIMS subtree.
+    const scoped = filterSiteIndexByScope(site, scope, reshaped)
+    expect(scoped).toHaveLength(1)
+    expect(scoped[0].label).toBe('USAWC-AFPIMS')
+
+    // Step 5: diff produces no false adds (AMSC, News, Home outside scope are filtered out)
+    // and no false moves (menu Overview now under Home, urlPath = ['/usawc-afpims']
+    // matches site Overview's urlPath = ['/usawc-afpims']).
+    const r = diffForests(reshaped, scoped)
+    expect(r.entries.filter(e => e.kind === 'moved')).toEqual([])
+    // The only added/removed entries should be the legitimate ones (the
+    // /portals/ PDF and the external Foundation link aren't in the scoped site
+    // index — those surface as 'removed', which the user can reject).
+    const added = r.entries.filter(e => e.kind === 'added')
+    expect(added).toEqual([])
+  })
+
+  it('produces zero moved entries after reshape against a matching site index', () => {
+    // The bug this fix addresses: a sibling-mode menu compared structurally
+    // against the site index produces phantom 'moved' entries.
+    const flatMenu = [
+      n('r', '/programs/', 'Programs'),
+      n('a', '/programs/a', 'A'),
+      n('b', '/programs/b', 'B'),
+    ]
+    const sibling = detectSiblingModeRoot(flatMenu)!
+    expect(sibling).toEqual({ rootIndex: 0 })
+    // Reshape: pull root out and nest the rest as its children.
+    const root = flatMenu[sibling.rootIndex]
+    const rest = flatMenu.filter((_, i) => i !== sibling.rootIndex)
+    const reshaped = [{ ...root, children: rest }]
+    // Site index has the matching shape (root with children nested).
+    const site = [
+      n('sr', '/programs/', 'Programs', [
+        n('sa', '/programs/a', 'A'),
+        n('sb', '/programs/b', 'B'),
+      ]),
+    ]
+    const scope = detectMenuScope(reshaped)
+    const scoped = filterSiteIndexByScope(site, scope, reshaped)
+    const r = diffForests(reshaped, scoped)
+    expect(r.entries.filter(e => e.kind === 'moved')).toEqual([])
+    expect(r.entries).toEqual([]) // no diff entries at all
   })
 })

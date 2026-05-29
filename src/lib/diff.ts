@@ -62,6 +62,37 @@ export function normalizeHref(href: string): string {
   }
 }
 
+// Internal: host-stripped normalization used by every matching/scoping
+// helper below. The user's menu is typically generated in site-root-relative
+// mode (paths only) while a freshly-pasted site index carries absolute URLs.
+// Comparing them via the host-inclusive `normalizeHref` would never match the
+// same internal page across those two forms. This helper canonicalizes both
+// to a path-only form so '/AMSC/' (menu) and 'https://example.com/AMSC/'
+// (site index) compare equal.
+//
+// Trade-off: two pages on different hosts with the same path also compare
+// equal — acceptable because the menu is built from one site's index, so
+// cross-host collisions would have to come from user-added external links
+// (which are excluded from scope detection via the `external` flag) or
+// genuine duplicates the user is already aware of.
+function normalizeHrefForMatch(href: string): string {
+  if (!href) return ''
+  const s = href.trim()
+  if (!s) return ''
+  const noFragment = s.split('#')[0]
+  if (!noFragment) return ''
+  try {
+    const u = new URL(noFragment)
+    let path = (u.pathname || '/').toLowerCase().replace(/\/{2,}/g, '/')
+    if (path !== '/' && path.endsWith('/')) path = path.slice(0, -1)
+    return path + u.search.toLowerCase()
+  } catch {
+    // Relative — defer to normalizeHref, which already produces a path-only
+    // result for non-URL inputs.
+    return normalizeHref(href)
+  }
+}
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 // URL-bearing ancestor hrefs, root → direct parent (normalized).
@@ -137,7 +168,7 @@ function indexForest(roots: SitemapNode[]): Indexed[] {
   function walk(nodes: SitemapNode[], urlPath: UrlPath, parent: SitemapNode | null): void {
     for (const n of nodes) {
       out.push({ node: n, urlPath, parent })
-      const nh = normalizeHref(n.href)
+      const nh = normalizeHrefForMatch(n.href)
       const childPath = nh ? [...urlPath, nh] : urlPath
       walk(n.children, childPath, n)
     }
@@ -152,14 +183,16 @@ function pathsEqual(a: UrlPath, b: UrlPath): boolean {
   return true
 }
 
-// Find the menu node whose normalized href matches `targetHref`. Returns the
-// id, or null if none. Used for resolving "where should this added page go"
-// and "where does this moved page belong now" from a site-side parent path.
+// Find the menu node whose normalized href matches `targetHref`. The caller
+// passes an already-normalized href (taken from a urlPath entry built by
+// indexForest, which uses normalizeHrefForMatch). Returns the matching node
+// or null. Used for resolving "where should this added page go" and "where
+// does this moved page belong now" from a site-side parent path.
 function findMenuNodeByHref(roots: SitemapNode[], targetHref: string): SitemapNode | null {
   if (!targetHref) return null
   function walk(nodes: SitemapNode[]): SitemapNode | null {
     for (const n of nodes) {
-      if (normalizeHref(n.href) === targetHref) return n
+      if (normalizeHrefForMatch(n.href) === targetHref) return n
       const found = walk(n.children)
       if (found) return found
     }
@@ -203,7 +236,7 @@ export function diffForests(
   // URL pass: build per-side queues keyed by normalized href. Skip empties.
   const menuByHref = new Map<string, Indexed[]>()
   for (const m of menuIdx) {
-    const h = normalizeHref(m.node.href)
+    const h = normalizeHrefForMatch(m.node.href)
     if (!h) continue
     const list = menuByHref.get(h) ?? []
     list.push(m)
@@ -211,7 +244,7 @@ export function diffForests(
   }
   const siteByHref = new Map<string, Indexed[]>()
   for (const s of siteIdx) {
-    const h = normalizeHref(s.node.href)
+    const h = normalizeHrefForMatch(s.node.href)
     if (!h) continue
     const list = siteByHref.get(h) ?? []
     list.push(s)
@@ -324,7 +357,7 @@ export function diffForests(
       : null
     entries.push({
       kind: 'added',
-      id: `add:${normalizeHref(s.node.href)}`,
+      id: `add:${normalizeHrefForMatch(s.node.href)}`,
       siteNode: s.node,
       siteParentPath: s.urlPath,
       suggestedMenuParentId: suggested ? suggested.id : null,
@@ -384,4 +417,151 @@ export function applyDiff(menuForest: SitemapNode[], entry: DiffEntry): SitemapN
 // Not exported from the package's main barrel; only the diff tests import it.
 export function __resetCloneCounter(): void {
   __cloneCounter = 0
+}
+
+// ── Scope detection ─────────────────────────────────────────────────────────
+
+// Split a normalized href into segments. Empty input → [].
+function hrefSegments(normalized: string): string[] {
+  if (!normalized) return []
+  return normalized.split('/').filter(s => s !== '')
+}
+
+// True for relative path hrefs ('/foo/bar', '/portals/x.pdf'). These can only
+// refer to the current site, so they're a robust internal-ness signal even
+// when applySiteUrl misclassified them as external — which happens when the
+// user pasted a menu whose internal links are mostly relative but whose only
+// absolute links point off-site (so detectSiteUrls picks one of those as the
+// dominant origin).
+function isPathOnlyHref(href: string): boolean {
+  const s = href.trim()
+  if (!s) return false
+  try {
+    new URL(s)
+    return false
+  } catch {
+    return s.startsWith('/')
+  }
+}
+
+// Dominant URL-path prefix among the menu's internal-looking hrefs. Returns
+// the segment-joined string (e.g. 'programs' — never includes a host since the
+// internal normalizer strips it) or '' when nothing dominates.
+//
+// "Internal-looking" means: not external, OR path-only (relative). The
+// path-only fallback is critical when applySiteUrl misclassified internal
+// links as external — see isPathOnlyHref above.
+//
+// Algorithm: majority-voting per depth. At each level, pick the segment with a
+// strict majority (> 50% of remaining candidates) and recurse on that subset.
+// Stop on tie or sub-majority. This tolerates outliers — a single
+// '/Portals/...' resource link tucked into a menu otherwise built around
+// '/USAWC-AFPIMS/...' no longer kills detection.
+//
+// Relative and absolute forms of the same internal page produce the same
+// segments — '/AMSC/News/' and 'https://example.com/AMSC/News/' both become
+// ['amsc', 'news'] via normalizeHrefForMatch — so a relative menu and an
+// absolute site index match correctly.
+export function detectMenuScope(menuForest: SitemapNode[]): string {
+  const paths: string[][] = []
+  function walk(nodes: SitemapNode[]): void {
+    for (const n of nodes) {
+      if (n.href && (!n.external || isPathOnlyHref(n.href))) {
+        const segs = hrefSegments(normalizeHrefForMatch(n.href))
+        if (segs.length > 0) paths.push(segs)
+      }
+      walk(n.children)
+    }
+  }
+  walk(menuForest)
+  if (paths.length === 0) return ''
+
+  const result: string[] = []
+  let candidates = paths
+  while (candidates.length > 0) {
+    const depth = result.length
+    const counts = new Map<string, number>()
+    for (const p of candidates) {
+      if (p.length <= depth) continue
+      const seg = p[depth]
+      counts.set(seg, (counts.get(seg) ?? 0) + 1)
+    }
+    if (counts.size === 0) break
+    let topSeg: string | null = null
+    let topCount = 0
+    let tied = false
+    for (const [seg, c] of counts) {
+      if (c > topCount) { topSeg = seg; topCount = c; tied = false }
+      else if (c === topCount) tied = true
+    }
+    if (tied || topSeg === null) break
+    // Strict majority required — guards against committing to a segment that
+    // only barely edges out alternatives on noisy small inputs.
+    if (topCount * 2 <= candidates.length) break
+    result.push(topSeg)
+    candidates = candidates.filter(p => p.length > depth && p[depth] === topSeg)
+  }
+  return result.join('/')
+}
+
+function segmentsEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+// Find the first node in `forest` whose normalized-href segments match
+// `target`'s segments. Compares by segments (not by string equality) so a
+// scope value like 'programs' matches a node whose normalized href is
+// '/programs' — the leading slash format differs between detectMenuScope's
+// segments-joined output and normalizeHref's relative-path output.
+function findNodeByNormalizedHref(forest: SitemapNode[], target: string): SitemapNode | null {
+  const targetSegs = hrefSegments(target)
+  function walk(nodes: SitemapNode[]): SitemapNode | null {
+    for (const n of nodes) {
+      if (segmentsEqual(hrefSegments(normalizeHrefForMatch(n.href)), targetSegs)) return n
+      const found = walk(n.children)
+      if (found) return found
+    }
+    return null
+  }
+  return walk(forest)
+}
+
+// Restrict the fresh site forest to the subtree implied by `scope`. See diff.ts
+// module docs for the algorithm + rationale.
+export function filterSiteIndexByScope(
+  siteForest: SitemapNode[],
+  scope: string,
+  menuForest: SitemapNode[],
+): SitemapNode[] {
+  if (!scope) return siteForest
+  const scopeRoot = findNodeByNormalizedHref(siteForest, scope)
+  if (!scopeRoot) return siteForest
+  const menuHasScopeRoot = findNodeByNormalizedHref(menuForest, scope) !== null
+  return menuHasScopeRoot ? [scopeRoot] : scopeRoot.children
+}
+
+// Detect whether the parsed menu has the structural signature of a sibling-
+// mode rooting: first item is a URL-bearing leaf whose URL matches the
+// dominant scope of the forest. Returns the root's index or null.
+//
+// The per-node "every URL-bearing descendant is strictly under the first
+// node's URL" check has been replaced with a single equality against
+// detectMenuScope's output. The scope's majority-voting already establishes
+// that the bulk of internal hrefs sit under the chosen prefix; outliers
+// (e.g. a single '/Portals/Academic-Program-Guide.pdf' tucked into a menu
+// otherwise built around '/USAWC-AFPIMS/...') are accepted rather than
+// rejecting the whole shape. This also means we don't need to re-check
+// first.external — detectMenuScope already handles the bad-external-flag
+// case via its path-only fallback.
+export function detectSiblingModeRoot(menuForest: SitemapNode[]): { rootIndex: number } | null {
+  if (menuForest.length < 2) return null
+  const first = menuForest[0]
+  if (!first.href || first.children.length > 0) return null
+  const scope = detectMenuScope(menuForest)
+  if (!scope) return null
+  const firstSegs = hrefSegments(normalizeHrefForMatch(first.href))
+  const scopeSegs = hrefSegments(scope)
+  return segmentsEqual(firstSegs, scopeSegs) ? { rootIndex: 0 } : null
 }

@@ -75,6 +75,9 @@ import {
 import {
   diffForests,
   applyDiff,
+  detectMenuScope,
+  filterSiteIndexByScope,
+  detectSiblingModeRoot,
   type DiffEntry,
 } from './lib/diff'
 import { Combobox } from '@base-ui/react/combobox'
@@ -315,7 +318,28 @@ export default function App() {
     }
     const detectedList = detectSiteUrls(result.forest)
     const detected = detectedList[0] ?? ''
-    const forest = applySiteUrl(result.forest, detected)
+    let forest = applySiteUrl(result.forest, detected)
+    // If the paste is a previously-generated au-sidenav menu AND its top-level
+    // shape matches sibling-mode rooting (first item is a leaf, every other
+    // top-level item is strictly under its URL), restore the rooted shape so
+    // the user gets their original rootId/rootMode back. Without this, compare
+    // mode flags every one of the root's children as a phantom 'moved' entry.
+    //
+    // If detection misfires, the user can re-paste; "Use entire sitemap"
+    // clears rootId but leaves the reshaped forest in place (no clean undo).
+    // detectSiblingModeRoot is deliberately strict to make false positives rare.
+    let nextRootId: string | null = null
+    let nextRootModeOverride: RootMode | null = null
+    if (result.isAuSidenavOutput) {
+      const sibling = detectSiblingModeRoot(forest)
+      if (sibling) {
+        const root = forest[sibling.rootIndex]
+        const rest = forest.filter((_, i) => i !== sibling.rootIndex)
+        forest = [{ ...root, children: rest }]
+        nextRootId = root.id
+        nextRootModeOverride = 'sibling'
+      }
+    }
     // Round-trip a previously-generated menu's custom header. The default is
     // "In this section"; only override when the pasted markup carried a real
     // custom header so a fresh sitemap paste doesn't clobber the user's edits.
@@ -324,7 +348,8 @@ export default function App() {
     setState(s => ({
       ...s,
       forest,
-      rootId: null,
+      rootId: nextRootId,
+      rootMode: nextRootModeOverride ?? s.rootMode,
       pageCount: result.pageCount,
       maxDepth: result.maxDepth,
       parseError: '',
@@ -615,13 +640,23 @@ export default function App() {
     if (sitePasteRef.current) sitePasteRef.current.innerHTML = ''
   }
 
+  // Infer the menu's original branch from its hrefs — the longest URL-path
+  // shared by every non-external, non-empty menu href. When non-empty, the
+  // diff only compares within that subtree of the site index, hiding noise
+  // from pages outside the user's original root pick.
+  const menuScope = useMemo(() => detectMenuScope(forest), [forest])
+  const scopedSiteForest = useMemo(
+    () => siteIndexForest ? filterSiteIndexByScope(siteIndexForest, menuScope, forest) : null,
+    [siteIndexForest, menuScope, forest],
+  )
+
   // Diff against the parsed site index — re-derives on every menu/site/forest
   // change so accepting an entry naturally drops it from the next render. The
   // entry list is filtered against rejectedDiffIds so dismissals persist for
   // the session without needing to track accepts.
   const diffResult = useMemo(
-    () => siteIndexForest ? diffForests(forest, siteIndexForest) : null,
-    [forest, siteIndexForest],
+    () => scopedSiteForest ? diffForests(forest, scopedSiteForest) : null,
+    [forest, scopedSiteForest],
   )
   const visibleEntries = useMemo(
     () => diffResult?.entries.filter(e => !rejectedDiffIds.has(e.id)) ?? [],
@@ -863,6 +898,7 @@ export default function App() {
                   diffEntries={entriesByMenuNodeId}
                   onAcceptDiff={handleAcceptDiff}
                   onRejectDiff={handleRejectDiff}
+                  inCompare={siteIndexForest !== null}
                 />
               </div>
             </div>
@@ -874,9 +910,12 @@ export default function App() {
               <ComparePanel
                 sitePasteRef={sitePasteRef}
                 siteIndexForest={siteIndexForest}
+                scopedSiteForest={scopedSiteForest}
+                menuScope={menuScope}
                 siteIndexParseError={siteIndexParseError}
                 visibleEntries={visibleEntries}
                 diffCounts={diffCounts}
+                categoryCount={diffResult?.unmatchedMenuCategories.length ?? 0}
                 onPaste={handleSitePaste}
                 onClear={handleClearSiteIndex}
                 onAccept={handleAcceptDiff}
@@ -1323,6 +1362,11 @@ interface EditableTreeProps {
   diffEntries?: Map<string, DiffEntry>
   onAcceptDiff?: (entry: DiffEntry) => void
   onRejectDiff?: (entryId: string) => void
+  // True when a site index is loaded for comparison. Drives passive
+  // "menu-only category" hints on empty-href rows — these aren't diff entries
+  // (categories can't appear in a site index by construction), but the user
+  // should still see a reminder that those rows are menu-only inventions.
+  inCompare?: boolean
 }
 
 function EditableTree({
@@ -1344,6 +1388,7 @@ function EditableTree({
   diffEntries,
   onAcceptDiff,
   onRejectDiff,
+  inCompare,
 }: EditableTreeProps) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
@@ -1393,6 +1438,7 @@ function EditableTree({
               diffEntries={diffEntries}
               onAcceptDiff={onAcceptDiff}
               onRejectDiff={onRejectDiff}
+              inCompare={inCompare}
             />
           ))}
           <li>
@@ -1435,6 +1481,7 @@ interface SortableEditableRowProps {
   diffEntries?: Map<string, DiffEntry>
   onAcceptDiff?: (entry: DiffEntry) => void
   onRejectDiff?: (entryId: string) => void
+  inCompare?: boolean
 }
 
 function SortableEditableRow({
@@ -1459,6 +1506,7 @@ function SortableEditableRow({
   diffEntries,
   onAcceptDiff,
   onRejectDiff,
+  inCompare,
 }: SortableEditableRowProps) {
   const {
     attributes,
@@ -1479,6 +1527,9 @@ function SortableEditableRow({
     opacity: isDragging ? 0.6 : 1,
   }
 
+  // Category rows in compare mode get a passive gray accent — visual marker
+  // that this row is menu-only (categories never exist in a site index).
+  const isMenuOnlyCategory = !diffEntry && !!inCompare && node.href.trim() === ''
   const diffAccent = diffEntry
     ? diffEntry.kind === 'removed'
       ? 'border-l-4 border-l-red-400'
@@ -1487,6 +1538,8 @@ function SortableEditableRow({
       : diffEntry.kind === 'moved'
       ? 'border-l-4 border-l-blue-400'
       : ''
+    : isMenuOnlyCategory
+    ? 'border-l-4 border-l-gray-300'
     : ''
 
   return (
@@ -1576,6 +1629,11 @@ function SortableEditableRow({
       {diffEntry && (
         <DiffBadge entry={diffEntry} excluded={!node.included} />
       )}
+      {isMenuOnlyCategory && (
+        <div className="ml-6 mt-1 inline-block text-[11px] px-2 py-0.5 rounded border text-gray-500 bg-gray-50 border-gray-200">
+          Menu-only category — not in site index
+        </div>
+      )}
       {urlOpen && (
         <div className="ml-6 mt-1 space-y-1">
           <div className="flex items-center gap-2">
@@ -1619,6 +1677,7 @@ function SortableEditableRow({
             diffEntries={diffEntries}
             onAcceptDiff={onAcceptDiff}
             onRejectDiff={onRejectDiff}
+            inCompare={inCompare}
           />
         </div>
       )}
@@ -1808,9 +1867,12 @@ function DiffBadge({ entry, excluded }: { entry: DiffEntry; excluded?: boolean }
 function ComparePanel({
   sitePasteRef,
   siteIndexForest,
+  scopedSiteForest,
+  menuScope,
   siteIndexParseError,
   visibleEntries,
   diffCounts,
+  categoryCount,
   onPaste,
   onClear,
   onAccept,
@@ -1818,14 +1880,21 @@ function ComparePanel({
 }: {
   sitePasteRef: RefObject<HTMLDivElement | null>
   siteIndexForest: SitemapNode[] | null
+  scopedSiteForest: SitemapNode[] | null
+  menuScope: string
   siteIndexParseError: string
   visibleEntries: DiffEntry[]
   diffCounts: { added: number; removed: number; renamed: number; moved: number; total: number }
+  categoryCount: number
   onPaste: (e: RClipboardEvent<HTMLDivElement>) => void
   onClear: () => void
   onAccept: (entry: DiffEntry) => void
   onReject: (entryId: string) => void
 }) {
+  // detectMenuScope joins segments with '/', no leading slash for relative
+  // paths and host-first for absolute. For display, prefix '/' on relative
+  // (no-host) scopes so users see a familiar URL-path form.
+  const scopeLabel = menuScope.includes('.') ? menuScope : '/' + menuScope
   // Map site-node id → added entry. Only 'added' entries live on this side;
   // removed/renamed/moved are surfaced on the Edit Menu rows. (Matched but
   // unchanged site nodes render with no badge.)
@@ -1873,6 +1942,11 @@ function ComparePanel({
 
       {siteIndexForest && (
         <>
+          {menuScope && (
+            <p className="text-[11px] text-gray-500 mb-2">
+              Comparing within <code className="font-mono">{scopeLabel}</code> — inferred from your menu's URLs.
+            </p>
+          )}
           <div className="mb-2 text-xs text-gray-600">
             {diffCounts.total === 0 ? (
               <span className="text-green-700 font-medium">✓ No differences — menu matches the site index.</span>
@@ -1888,10 +1962,15 @@ function ComparePanel({
                 {diffCounts.moved > 0 && <span className="text-blue-700">{diffCounts.moved} moved</span>}
               </span>
             )}
+            {categoryCount > 0 && (
+              <span className="text-gray-500">
+                {' '}· {categoryCount} menu-only categor{categoryCount === 1 ? 'y' : 'ies'} preserved
+              </span>
+            )}
           </div>
           <div className="border border-gray-200 rounded-lg max-h-[640px] overflow-auto p-2">
             <SiteIndexTree
-              nodes={siteIndexForest}
+              nodes={scopedSiteForest ?? siteIndexForest}
               addedByNodeId={addedByNodeId}
               onAccept={onAccept}
               onReject={onReject}
