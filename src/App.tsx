@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect, type ChangeEvent, type ClipboardEvent as RClipboardEvent, type RefObject } from 'react'
+import { useState, useMemo, useRef, useEffect, type ClipboardEvent as RClipboardEvent } from 'react'
 
 import { HELPER_URL, REPO_URL, HERO_IMAGE_URL, HERO_VIDEO_URL } from './lib/config'
 
@@ -373,7 +373,11 @@ export default function App() {
   // Skips the menu-side reshaping (no rootId, no rootMode) — the comparison
   // always operates on the full forest, since the user's pick of a root is a
   // rendering choice, not a structural one.
-  const ingestSiteIndexHtml = (html: string) => {
+  // Returns true when the paste parsed into a usable forest. The caller uses
+  // this to decide whether to switch into the compare layout — a failed parse
+  // keeps the user on the paste box (with the error) rather than dropping them
+  // into an empty compare panel.
+  const ingestSiteIndexHtml = (html: string): boolean => {
     const result = parseSitemapHtml(html)
     if (result.forest.length === 0) {
       setState(s => ({
@@ -382,7 +386,7 @@ export default function App() {
         siteIndexForest: null,
         siteIndexParseError: 'No links or list items found in the site index paste.',
       }))
-      return
+      return false
     }
     // parseSitemapHtml reset the id counter to 0 and ran up to N. The menu
     // forest already has ids in the 'n*' range from an earlier parse — advance
@@ -400,17 +404,22 @@ export default function App() {
         rejectedDiffIds: new Set(),
       }
     })
+    return true
   }
 
+  // Paste handler for the second paste box (shown under the main paste once a
+  // menu paste is detected). On a successful parse it switches into the compare
+  // layout so the diff appears immediately; on failure it leaves the user on
+  // the paste box, where ingestSiteIndexHtml has surfaced the error.
   const handleSitePaste = (e: RClipboardEvent<HTMLDivElement>) => {
     e.preventDefault()
     const html = e.clipboardData.getData('text/html')
-    if (html) {
-      ingestSiteIndexHtml(html)
-      return
+    const content = html || e.clipboardData.getData('text/plain')
+    if (!content) return
+    if (ingestSiteIndexHtml(content)) {
+      setExpanded(false)
+      setCompareMode(true)
     }
-    const text = e.clipboardData.getData('text/plain')
-    if (text) ingestSiteIndexHtml(text)
   }
 
   const handleClearSiteIndex = () => {
@@ -421,6 +430,9 @@ export default function App() {
       siteIndexParseError: '',
       rejectedDiffIds: new Set(),
     }))
+    // Drop back to the default layout so the (now-only) site-index paste box
+    // in column 1 is visible again for a re-paste.
+    setCompareMode(false)
     if (sitePasteRef.current) sitePasteRef.current.innerHTML = ''
   }
 
@@ -477,10 +489,6 @@ export default function App() {
     // Fallback: plain text might still be a hand-typed list of URLs.
     const text = e.clipboardData.getData('text/plain')
     if (text) ingestHtml(text)
-  }
-
-  const handlePasteAreaTextChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
-    ingestHtml(e.target.value)
   }
 
   // Strip the auto-added " Home" suffix from a root, but only when we know we
@@ -714,9 +722,9 @@ export default function App() {
 
             {/* Section 1: Paste */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
-              <SectionLabel number={1} title="Paste your site index" done={hasForest} />
+              <SectionLabel number={1} title="Paste a site index or sidenav" done={hasForest} />
               <p className="text-xs text-gray-500 mb-2">
-                Open a styled site-index page in your browser, select the visible list, copy, then paste here. Works best with a hierarchical sitemap based on <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;ul&gt;</code>, <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;li&gt;</code>, and <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;a&gt;</code> tags.
+                Open a site-index or an existing sidenav in your browser, copy it, then paste here. Works best if your paste contained a hierarchical list based on <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;ul&gt;</code>, <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;li&gt;</code>, and <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;a&gt;</code> tags.
               </p>
               <div
                 ref={pasteRef}
@@ -724,11 +732,11 @@ export default function App() {
                 suppressContentEditableWarning
                 onPaste={handlePaste}
                 className="min-h-[80px] w-full px-3 py-2 border-2 border-dashed border-blue-300 rounded-lg text-xs text-gray-600 bg-blue-50/40 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 cursor-text"
-                aria-label="Paste site index here"
+                aria-label="Paste site index or existing sidenav here"
               />
               {hasForest && (
                 <p className="mt-2 text-xs text-green-700 font-medium">
-                  ✓ Captured {pageCount} page{pageCount === 1 ? '' : 's'} across {maxDepth} level{maxDepth === 1 ? '' : 's'}.
+                  ✓ Captured {pageCount} page{pageCount === 1 ? '' : 's'} across {maxDepth} level{maxDepth === 1 ? '' : 's'}{isMenuPaste ? ' from a pasted sidenav' : ''}.
                 </p>
               )}
               {hasForest && detectedSiteUrl && (
@@ -736,18 +744,43 @@ export default function App() {
                   ✓ Detected site URL <code className="font-mono">{detectedSiteUrl}</code>
                 </p>
               )}
+              {/* Collapsed sub-menus are display:none in the rendered sidenav, so
+                  copying a rendered page drops their children from the clipboard.
+                  Pasting the source HTML keeps every level — nudge the user there
+                  if items look missing. Only relevant for sidenav pastes. */}
+              {isMenuPaste && (
+                <p className="mt-1 text-xs text-blue-700">
+                  ⓘ Items missing? Collapsed items aren't included when you copy. Paste the menu's source HTML instead to keep every level or fully expand the menu before copying.
+                </p>
+              )}
               {parseError && (
                 <p className="mt-2 text-xs text-red-600">{parseError}</p>
               )}
-              <details className="mt-2">
-                <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">Or paste raw HTML</summary>
-                <textarea
-                  className="mt-2 w-full h-24 px-2 py-1 border border-gray-300 rounded text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="<ul><li><a href='...'>...</a></li></ul>"
-                  onChange={handlePasteAreaTextChange}
-                />
-              </details>
             </div>
+
+            {/* Compare entry: appears once a previously-generated menu is pasted.
+                Pasting a fresh site index here parses it and switches into the
+                compare layout (see handleSitePaste). Replaces the old hidden
+                paste box that lived inside ComparePanel. */}
+            {isMenuPaste && (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
+                <h2 className="text-base font-semibold text-gray-800 mb-2">Compare sidenav against a site index</h2>
+                <p className="text-xs text-gray-500 mb-2">
+                  Optionally paste a site index here to compare your sidenav to it and choose which differences to approve or reject.
+                </p>
+                <div
+                  ref={sitePasteRef}
+                  contentEditable
+                  suppressContentEditableWarning
+                  onPaste={handleSitePaste}
+                  className="min-h-[80px] w-full px-3 py-2 border-2 border-dashed border-blue-300 rounded-lg text-xs text-gray-600 bg-blue-50/40 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 cursor-text"
+                  aria-label="Paste fresh site index to compare"
+                />
+                {siteIndexParseError && (
+                  <p className="mt-2 text-xs text-red-600">{siteIndexParseError}</p>
+                )}
+              </div>
+            )}
 
             {/* Section 2: Choose root */}
             <div className={`bg-white rounded-xl shadow-sm border border-gray-100 p-4 transition-opacity
@@ -908,15 +941,12 @@ export default function App() {
           {compareMode && (
             <div className="w-full lg:flex-[3] lg:min-w-0">
               <ComparePanel
-                sitePasteRef={sitePasteRef}
                 siteIndexForest={siteIndexForest}
                 scopedSiteForest={scopedSiteForest}
                 menuScope={menuScope}
-                siteIndexParseError={siteIndexParseError}
                 visibleEntries={visibleEntries}
                 diffCounts={diffCounts}
                 categoryCount={diffResult?.unmatchedMenuCategories.length ?? 0}
-                onPaste={handleSitePaste}
                 onClear={handleClearSiteIndex}
                 onAccept={handleAcceptDiff}
                 onReject={handleRejectDiff}
@@ -1860,33 +1890,28 @@ function DiffBadge({ entry, excluded }: { entry: DiffEntry; excluded?: boolean }
 }
 
 // The full Compare panel that sits in the layout between Edit Menu and Live
-// Preview when compareMode is on. Two states:
-//   1. Empty — paste-area waiting for a fresh site index.
-//   2. Active — diff counts, then a read-only site-index tree with badges +
-//      accept/reject buttons on rows that are involved in a diff entry.
+// Preview when compareMode is on. The site index is pasted from the box in
+// column 1 (handleSitePaste), which switches into this layout on a successful
+// parse — so by the time this panel renders it always has a site index forest:
+// it shows diff counts, then a read-only site-index tree with badges +
+// accept/reject buttons on rows that are involved in a diff entry.
 function ComparePanel({
-  sitePasteRef,
   siteIndexForest,
   scopedSiteForest,
   menuScope,
-  siteIndexParseError,
   visibleEntries,
   diffCounts,
   categoryCount,
-  onPaste,
   onClear,
   onAccept,
   onReject,
 }: {
-  sitePasteRef: RefObject<HTMLDivElement | null>
   siteIndexForest: SitemapNode[] | null
   scopedSiteForest: SitemapNode[] | null
   menuScope: string
-  siteIndexParseError: string
   visibleEntries: DiffEntry[]
   diffCounts: { added: number; removed: number; renamed: number; moved: number; total: number }
   categoryCount: number
-  onPaste: (e: RClipboardEvent<HTMLDivElement>) => void
   onClear: () => void
   onAccept: (entry: DiffEntry) => void
   onReject: (entryId: string) => void
@@ -1920,25 +1945,6 @@ function ComparePanel({
           </button>
         )}
       </div>
-
-      {!siteIndexForest && (
-        <>
-          <p className="text-xs text-gray-500 mb-2">
-            Paste a fresh Site Index here. The tool will compare it against your customized menu and flag new pages, removed pages, renames, and moves — you can accept or reject each change.
-          </p>
-          <div
-            ref={sitePasteRef}
-            contentEditable
-            suppressContentEditableWarning
-            onPaste={onPaste}
-            className="min-h-[80px] w-full px-3 py-2 border-2 border-dashed border-blue-300 rounded-lg text-xs text-gray-600 bg-blue-50/40 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 cursor-text"
-            aria-label="Paste fresh site index here"
-          />
-          {siteIndexParseError && (
-            <p className="mt-2 text-xs text-red-600">{siteIndexParseError}</p>
-          )}
-        </>
-      )}
 
       {siteIndexForest && (
         <>
