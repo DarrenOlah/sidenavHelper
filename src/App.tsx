@@ -750,7 +750,7 @@ export default function App() {
                   if items look missing. Only relevant for sidenav pastes. */}
               {isMenuPaste && (
                 <p className="mt-1 text-xs text-blue-700">
-                  ⓘ Items missing? Collapsed items aren't included when you copy. Paste the menu's source HTML instead to keep every level or fully expand the menu before copying.
+                  ⓘ Items missing? Collapsed menu items aren't included when you copy. Fully expand the menu before copying, or copy its source HTML.
                 </p>
               )}
               {parseError && (
