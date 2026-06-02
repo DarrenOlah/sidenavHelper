@@ -90,6 +90,31 @@ export function parseSitemapHtml(html: string): ParseResult {
   return summarize(forest, detectedHeaderText, isAuSidenavOutput)
 }
 
+// Pick the clipboard flavor that yields the richer parse. Copying from a
+// rendered page puts real DOM in text/html; copying from a source/code view
+// puts syntax-highlighted noise in text/html (styling spans with the angle
+// brackets escaped to entities) and the real markup in text/plain. Parse both,
+// keep whichever produced more pages. Ties prefer text/html so a rendered-page
+// paste behaves exactly as before.
+//
+// Each parseSitemapHtml call resets the id counter from 0, and we only ever use
+// one of the two results, so the double parse can't cause id collisions.
+export function parseBestSitemap(
+  html: string,
+  text: string,
+): { result: ParseResult; source: string } {
+  const fromHtml = html ? parseSitemapHtml(html) : null
+  const fromText = text ? parseSitemapHtml(text) : null
+  if (fromHtml && fromText) {
+    return fromText.pageCount > fromHtml.pageCount
+      ? { result: fromText, source: text }
+      : { result: fromHtml, source: html }
+  }
+  if (fromHtml) return { result: fromHtml, source: html }
+  if (fromText) return { result: fromText, source: text }
+  return { result: parseSitemapHtml(''), source: '' }
+}
+
 function listToNodes(ul: Element, baseHref: string | undefined): SitemapNode[] {
   const items: SitemapNode[] = []
   // Direct child <li>s only — recursion handles nested <ul>s.

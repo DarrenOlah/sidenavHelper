@@ -49,7 +49,7 @@ declare global {
 }
 
 import {
-  parseSitemapHtml,
+  parseBestSitemap,
   generateSidenavHtml,
   renameNode,
   setIncluded,
@@ -71,6 +71,7 @@ import {
   type SitemapNode,
   type RootMode,
   type HrefMode,
+  type ParseResult,
 } from './lib/sitemap'
 import {
   diffForests,
@@ -297,8 +298,7 @@ export default function App() {
 
   // ── Handlers ───────────────────────────────────────────────────────────────
 
-  const ingestHtml = (html: string) => {
-    const result = parseSitemapHtml(html)
+  const ingestHtml = (result: ParseResult) => {
     if (result.forest.length === 0) {
       setState(s => ({
         ...s,
@@ -306,7 +306,7 @@ export default function App() {
         rootId: null,
         pageCount: 0,
         maxDepth: 0,
-        parseError: 'No links or list items found. Try copying the rendered site index page (not the source HTML).',
+        parseError: 'No links or list items found. Paste a hierarchical list of <ul>/<li>/<a> tags — either a copied site-index page or its raw source HTML.',
         isMenuPaste: false,
         siteIndexHtml: '',
         siteIndexForest: null,
@@ -377,12 +377,11 @@ export default function App() {
   // this to decide whether to switch into the compare layout — a failed parse
   // keeps the user on the paste box (with the error) rather than dropping them
   // into an empty compare panel.
-  const ingestSiteIndexHtml = (html: string): boolean => {
-    const result = parseSitemapHtml(html)
+  const ingestSiteIndexHtml = (result: ParseResult, source: string): boolean => {
     if (result.forest.length === 0) {
       setState(s => ({
         ...s,
-        siteIndexHtml: html,
+        siteIndexHtml: source,
         siteIndexForest: null,
         siteIndexParseError: 'No links or list items found in the site index paste.',
       }))
@@ -396,7 +395,7 @@ export default function App() {
       ensureIdsPast(s.forest, result.forest)
       return {
         ...s,
-        siteIndexHtml: html,
+        siteIndexHtml: source,
         siteIndexForest: result.forest,
         siteIndexParseError: '',
         // A fresh site index supersedes any previously-rejected entries —
@@ -413,10 +412,14 @@ export default function App() {
   // the paste box, where ingestSiteIndexHtml has surfaced the error.
   const handleSitePaste = (e: RClipboardEvent<HTMLDivElement>) => {
     e.preventDefault()
-    const html = e.clipboardData.getData('text/html')
-    const content = html || e.clipboardData.getData('text/plain')
-    if (!content) return
-    if (ingestSiteIndexHtml(content)) {
+    // Same dual-flavor parse as handlePaste — accept raw source HTML as well as
+    // a copied rendered page (see parseBestSitemap).
+    const { result, source } = parseBestSitemap(
+      e.clipboardData.getData('text/html'),
+      e.clipboardData.getData('text/plain'),
+    )
+    if (!source) return
+    if (ingestSiteIndexHtml(result, source)) {
       setExpanded(false)
       setCompareMode(true)
     }
@@ -481,14 +484,15 @@ export default function App() {
 
   const handlePaste = (e: RClipboardEvent<HTMLDivElement>) => {
     e.preventDefault()
-    const html = e.clipboardData.getData('text/html')
-    if (html) {
-      ingestHtml(html)
-      return
-    }
-    // Fallback: plain text might still be a hand-typed list of URLs.
-    const text = e.clipboardData.getData('text/plain')
-    if (text) ingestHtml(text)
+    // Parse both clipboard flavors and keep whichever yields a real forest:
+    // a rendered page puts real DOM in text/html, while copying source from a
+    // code/view-source pane puts syntax-highlight noise there and the actual
+    // markup in text/plain. text/plain also covers a hand-typed list of URLs.
+    const { result } = parseBestSitemap(
+      e.clipboardData.getData('text/html'),
+      e.clipboardData.getData('text/plain'),
+    )
+    ingestHtml(result)
   }
 
   // Strip the auto-added " Home" suffix from a root, but only when we know we
