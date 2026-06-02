@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect, type ChangeEvent, type ClipboardEvent as RClipboardEvent } from 'react'
+import { useState, useMemo, useRef, useEffect, type ClipboardEvent as RClipboardEvent } from 'react'
 
 import { HELPER_URL, REPO_URL, HERO_IMAGE_URL, HERO_VIDEO_URL } from './lib/config'
 
@@ -49,7 +49,7 @@ declare global {
 }
 
 import {
-  parseSitemapHtml,
+  parseBestSitemap,
   generateSidenavHtml,
   renameNode,
   setIncluded,
@@ -67,10 +67,21 @@ import {
   detectSiteUrls,
   applySiteUrl,
   isValidSiteUrl,
+  ensureIdsPast,
   type SitemapNode,
   type RootMode,
   type HrefMode,
+  type ParseResult,
 } from './lib/sitemap'
+import {
+  diffForests,
+  applyDiff,
+  detectMenuScope,
+  listScopeCandidates,
+  filterSiteIndexByScope,
+  detectSiblingModeRoot,
+  type DiffEntry,
+} from './lib/diff'
 import { Combobox } from '@base-ui/react/combobox'
 import {
   ACCENT_PRESETS,
@@ -113,6 +124,25 @@ interface State {
   // All distinct origins from the last paste, ranked by frequency desc.
   // Populates the combobox dropdown.
   detectedSiteUrls: string[]
+  // True when the first paste's HTML carried au-sidenav class markers — i.e.
+  // the user pasted a previously-generated menu. Enables the Compare-with-
+  // Site-Index flow (otherwise the ⇆ Compare button stays hidden).
+  isMenuPaste: boolean
+  // Raw HTML of the second paste (the fresh site index). Kept around so
+  // toggling compareMode off and back on doesn't drop the comparison.
+  siteIndexHtml: string
+  // Parsed second paste. null when no site index is loaded.
+  siteIndexForest: SitemapNode[] | null
+  siteIndexParseError: string
+  // Diff entry ids the user explicitly dismissed. Accepted entries don't need
+  // tracking because applyDiff mutates the menu forest and they fall out of
+  // the next diff naturally.
+  rejectedDiffIds: Set<string>
+  // Manual override for the compare scope (which site-index branch the menu is
+  // diffed against). null = use the autodetected scope; '' = explicit whole
+  // site index; any other value = an explicit branch prefix. Resets to null on
+  // every new paste so a stale override never silently mis-scopes a new menu.
+  manualScope: string | null
 }
 
 const INITIAL_STATE: State = {
@@ -132,6 +162,12 @@ const INITIAL_STATE: State = {
   siteUrl: '',
   detectedSiteUrl: '',
   detectedSiteUrls: [],
+  isMenuPaste: false,
+  siteIndexHtml: '',
+  siteIndexForest: null,
+  siteIndexParseError: '',
+  rejectedDiffIds: new Set(),
+  manualScope: null,
 }
 
 // ── Asset download (panel 4) ─────────────────────────────────────────────────
@@ -154,6 +190,35 @@ function downloadAsset(filename: string, content: string, mimeType: string) {
   a.click()
   a.remove()
   URL.revokeObjectURL(url)
+}
+
+// Collect every id in a forest into a Set (DFS). Used for finding the diff
+// between two consecutive forest snapshots — see findRecentlyAddedId.
+function collectIds(forest: SitemapNode[], out: Set<string> = new Set()): Set<string> {
+  for (const n of forest) {
+    out.add(n.id)
+    collectIds(n.children, out)
+  }
+  return out
+}
+
+// Given two forests where `next` was produced by inserting one new node into
+// `prev`, return that new node's id. Used by the accept-diff flow to find the
+// freshly-inserted node so it can be flagged as user-added.
+function findRecentlyAddedId(prev: SitemapNode[], next: SitemapNode[]): string | null {
+  const prevIds = collectIds(prev)
+  let found: string | null = null
+  function walk(nodes: SitemapNode[]): void {
+    for (const n of nodes) {
+      if (!prevIds.has(n.id)) {
+        if (!found) found = n.id
+        return
+      }
+      walk(n.children)
+    }
+  }
+  walk(next)
+  return found
 }
 
 // ── Section label (mirrors heroHelper) ───────────────────────────────────────
@@ -186,9 +251,15 @@ export default function App() {
   // Only meaningful at the lg breakpoint; below that, columns stack and the
   // toggle has no visual effect.
   const [expanded, setExpanded] = useState(false)
+  // Compare-with-Site-Index mode: hides cols 1 & 4 and inserts a ComparePanel
+  // between the Edit Menu and Live Preview. Same lg-breakpoint behavior as
+  // `expanded`. Mutually exclusive with `expanded` — toggling either off the
+  // other so the layout never tries to honor both at once.
+  const [compareMode, setCompareMode] = useState(false)
   const pasteRef = useRef<HTMLDivElement | null>(null)
+  const sitePasteRef = useRef<HTMLDivElement | null>(null)
 
-  const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, accentColor, pageCount, maxDepth, parseError, previewCurrentPath, addedIds, siteUrl, detectedSiteUrl, detectedSiteUrls } = state
+  const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, accentColor, pageCount, maxDepth, parseError, previewCurrentPath, addedIds, siteUrl, detectedSiteUrl, detectedSiteUrls, isMenuPaste, siteIndexForest, siteIndexParseError, rejectedDiffIds, manualScope } = state
 
   const hasForest = forest.length > 0
   const hasPickedRoot = rootId !== null && findNode(forest, rootId) !== null
@@ -234,8 +305,7 @@ export default function App() {
 
   // ── Handlers ───────────────────────────────────────────────────────────────
 
-  const ingestHtml = (html: string) => {
-    const result = parseSitemapHtml(html)
+  const ingestHtml = (result: ParseResult) => {
     if (result.forest.length === 0) {
       setState(s => ({
         ...s,
@@ -243,13 +313,41 @@ export default function App() {
         rootId: null,
         pageCount: 0,
         maxDepth: 0,
-        parseError: 'No links or list items found. Try copying the rendered site index page (not the source HTML).',
+        parseError: 'No links or list items found. Paste a hierarchical list of <ul>/<li>/<a> tags — either a copied site-index page or its raw source HTML.',
+        isMenuPaste: false,
+        siteIndexHtml: '',
+        siteIndexForest: null,
+        siteIndexParseError: '',
+        rejectedDiffIds: new Set(),
+        manualScope: null,
       }))
+      setCompareMode(false)
       return
     }
     const detectedList = detectSiteUrls(result.forest)
     const detected = detectedList[0] ?? ''
-    const forest = applySiteUrl(result.forest, detected)
+    let forest = applySiteUrl(result.forest, detected)
+    // If the paste is a previously-generated au-sidenav menu AND its top-level
+    // shape matches sibling-mode rooting (first item is a leaf, every other
+    // top-level item is strictly under its URL), restore the rooted shape so
+    // the user gets their original rootId/rootMode back. Without this, compare
+    // mode flags every one of the root's children as a phantom 'moved' entry.
+    //
+    // If detection misfires, the user can re-paste; "Use entire sitemap"
+    // clears rootId but leaves the reshaped forest in place (no clean undo).
+    // detectSiblingModeRoot is deliberately strict to make false positives rare.
+    let nextRootId: string | null = null
+    let nextRootModeOverride: RootMode | null = null
+    if (result.isAuSidenavOutput) {
+      const sibling = detectSiblingModeRoot(forest)
+      if (sibling) {
+        const root = forest[sibling.rootIndex]
+        const rest = forest.filter((_, i) => i !== sibling.rootIndex)
+        forest = [{ ...root, children: rest }]
+        nextRootId = root.id
+        nextRootModeOverride = 'sibling'
+      }
+    }
     // Round-trip a previously-generated menu's custom header. The default is
     // "In this section"; only override when the pasted markup carried a real
     // custom header so a fresh sitemap paste doesn't clobber the user's edits.
@@ -258,7 +356,8 @@ export default function App() {
     setState(s => ({
       ...s,
       forest,
-      rootId: null,
+      rootId: nextRootId,
+      rootMode: nextRootModeOverride ?? s.rootMode,
       pageCount: result.pageCount,
       maxDepth: result.maxDepth,
       parseError: '',
@@ -266,23 +365,176 @@ export default function App() {
       detectedSiteUrl: detected,
       detectedSiteUrls: detectedList,
       headerText: hasCustomHeader ? result.detectedHeaderText : s.headerText,
+      // A new menu paste invalidates any pending compare flow.
+      isMenuPaste: result.isAuSidenavOutput,
+      siteIndexHtml: '',
+      siteIndexForest: null,
+      siteIndexParseError: '',
+      rejectedDiffIds: new Set(),
+      manualScope: null,
     }))
+    // Exit compare mode whenever the menu changes — the previous comparison
+    // doesn't apply to the new paste.
+    setCompareMode(false)
+  }
+
+  // Parse a fresh site-index HTML for comparison against the customized menu.
+  // Skips the menu-side reshaping (no rootId, no rootMode) — the comparison
+  // always operates on the full forest, since the user's pick of a root is a
+  // rendering choice, not a structural one.
+  // Returns true when the paste parsed into a usable forest. The caller uses
+  // this to decide whether to switch into the compare layout — a failed parse
+  // keeps the user on the paste box (with the error) rather than dropping them
+  // into an empty compare panel.
+  const ingestSiteIndexHtml = (result: ParseResult, source: string): boolean => {
+    if (result.forest.length === 0) {
+      setState(s => ({
+        ...s,
+        siteIndexHtml: source,
+        siteIndexForest: null,
+        siteIndexParseError: 'No links or list items found in the site index paste.',
+      }))
+      return false
+    }
+    // parseSitemapHtml reset the id counter to 0 and ran up to N. The menu
+    // forest already has ids in the 'n*' range from an earlier parse — advance
+    // the counter past the union so any later makeNode() call (e.g. "+ Add
+    // page") produces ids that don't collide with existing menu nodes.
+    setState(s => {
+      ensureIdsPast(s.forest, result.forest)
+      return {
+        ...s,
+        siteIndexHtml: source,
+        siteIndexForest: result.forest,
+        siteIndexParseError: '',
+        // A fresh site index supersedes any previously-rejected entries —
+        // they were keyed against the previous diff and may not match anymore.
+        rejectedDiffIds: new Set(),
+        // A fresh site index also clears any manual scope override — the new
+        // index may have a different shape than the one the user scoped against.
+        manualScope: null,
+      }
+    })
+    return true
+  }
+
+  // Paste handler for the second paste box (shown under the main paste once a
+  // menu paste is detected). On a successful parse it switches into the compare
+  // layout so the diff appears immediately; on failure it leaves the user on
+  // the paste box, where ingestSiteIndexHtml has surfaced the error.
+  const handleSitePaste = (e: RClipboardEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    // Same dual-flavor parse as handlePaste — accept raw source HTML as well as
+    // a copied rendered page (see parseBestSitemap).
+    const { result, source } = parseBestSitemap(
+      e.clipboardData.getData('text/html'),
+      e.clipboardData.getData('text/plain'),
+    )
+    if (!source) return
+    if (ingestSiteIndexHtml(result, source)) {
+      setExpanded(false)
+      setCompareMode(true)
+    }
+  }
+
+  const handleClearSiteIndex = () => {
+    setState(s => ({
+      ...s,
+      siteIndexHtml: '',
+      siteIndexForest: null,
+      siteIndexParseError: '',
+      rejectedDiffIds: new Set(),
+      manualScope: null,
+    }))
+    // Drop back to the default layout so the (now-only) site-index paste box
+    // in column 1 is visible again for a re-paste.
+    setCompareMode(false)
+    if (sitePasteRef.current) sitePasteRef.current.innerHTML = ''
+  }
+
+  const handleAcceptDiff = (entry: DiffEntry) => {
+    setState(s => {
+      const nextForest = applyDiff(s.forest, entry)
+      // For an inserted page, also flag it as user-added so the URL editor
+      // pops open and the delete button shows — matching the existing
+      // "+ Add page" UX. The inserted node is the last child of the suggested
+      // parent (or last top-level when no parent).
+      if (entry.kind !== 'added') return { ...s, forest: nextForest }
+      const insertedId = findRecentlyAddedId(s.forest, nextForest)
+      if (!insertedId) return { ...s, forest: nextForest }
+      const nextAdded = new Set(s.addedIds)
+      nextAdded.add(insertedId)
+      return { ...s, forest: nextForest, addedIds: nextAdded }
+    })
+  }
+
+  const handleRejectDiff = (entryId: string) => {
+    setState(s => {
+      const next = new Set(s.rejectedDiffIds)
+      next.add(entryId)
+      return { ...s, rejectedDiffIds: next }
+    })
+  }
+
+  // Manual compare-scope override. null = autodetect, '' = whole site index,
+  // otherwise an explicit branch prefix. Fed into filterSiteIndexByScope.
+  const handleSetScope = (scope: string | null) => {
+    setState(s => ({ ...s, manualScope: scope }))
+  }
+
+  // Bulk rename controls. Renames are kept by default (excluded from the active
+  // change count), so these let the user resolve the whole batch at once.
+  // "Keep all" dismisses every rename entry; "Accept all" applies every
+  // site-index label. Entries are passed in (captured from the current diff) so
+  // the handlers don't depend on stale closure state.
+  const handleKeepAllRenames = (entries: DiffEntry[]) => {
+    setState(s => {
+      const next = new Set(s.rejectedDiffIds)
+      for (const e of entries) next.add(e.id)
+      return { ...s, rejectedDiffIds: next }
+    })
+  }
+
+  const handleAcceptAllRenames = (entries: DiffEntry[]) => {
+    setState(s => {
+      // Renames only touch labels (not structure), so folding applyDiff over
+      // one forest accumulator is order-independent and has no id staleness.
+      let nextForest = s.forest
+      for (const e of entries) nextForest = applyDiff(nextForest, e)
+      return { ...s, forest: nextForest }
+    })
+  }
+
+  // Layout toggle: cols 1 + 4 hide, Edit Menu + Compare panel take 3/4 of the
+  // page, Live Preview gets the remaining 1/4. Mutually exclusive with the
+  // existing `expanded` mode (Edit Menu + Preview only).
+  const handleToggleCompare = () => {
+    setCompareMode(m => {
+      const next = !m
+      if (next) setExpanded(false)
+      return next
+    })
+  }
+
+  const handleToggleExpand = () => {
+    setExpanded(e => {
+      const next = !e
+      if (next) setCompareMode(false)
+      return next
+    })
   }
 
   const handlePaste = (e: RClipboardEvent<HTMLDivElement>) => {
     e.preventDefault()
-    const html = e.clipboardData.getData('text/html')
-    if (html) {
-      ingestHtml(html)
-      return
-    }
-    // Fallback: plain text might still be a hand-typed list of URLs.
-    const text = e.clipboardData.getData('text/plain')
-    if (text) ingestHtml(text)
-  }
-
-  const handlePasteAreaTextChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
-    ingestHtml(e.target.value)
+    // Parse both clipboard flavors and keep whichever yields a real forest:
+    // a rendered page puts real DOM in text/html, while copying source from a
+    // code/view-source pane puts syntax-highlight noise there and the actual
+    // markup in text/plain. text/plain also covers a hand-typed list of URLs.
+    const { result } = parseBestSitemap(
+      e.clipboardData.getData('text/html'),
+      e.clipboardData.getData('text/plain'),
+    )
+    ingestHtml(result)
   }
 
   // Strip the auto-added " Home" suffix from a root, but only when we know we
@@ -437,8 +689,70 @@ export default function App() {
   const handleReset = () => {
     setState(INITIAL_STATE)
     setCopied(false)
+    setCompareMode(false)
     if (pasteRef.current) pasteRef.current.innerHTML = ''
+    if (sitePasteRef.current) sitePasteRef.current.innerHTML = ''
   }
+
+  // Infer the menu's original branch from its hrefs — the common URL-path
+  // prefix of the menu's top-level branches. When non-empty, the diff only
+  // compares within that subtree of the site index, hiding noise from pages
+  // outside the user's original root pick.
+  const autoScope = useMemo(() => detectMenuScope(forest), [forest])
+  // Effective scope: the manual override when set, else the autodetected scope.
+  // Uses ?? (not ||) so an explicit '' (whole site index) is honored.
+  const menuScope = manualScope ?? autoScope
+  // Candidate branches the manual-override control offers (in addition to its
+  // own "Auto" and "Whole site index" choices).
+  const scopeCandidates = useMemo(() => listScopeCandidates(forest), [forest])
+  const scopedSiteForest = useMemo(
+    () => siteIndexForest ? filterSiteIndexByScope(siteIndexForest, menuScope, forest) : null,
+    [siteIndexForest, menuScope, forest],
+  )
+
+  // Diff against the parsed site index — re-derives on every menu/site/forest
+  // change so accepting an entry naturally drops it from the next render. The
+  // entry list is filtered against rejectedDiffIds so dismissals persist for
+  // the session without needing to track accepts.
+  const diffResult = useMemo(
+    () => scopedSiteForest ? diffForests(forest, scopedSiteForest) : null,
+    [forest, scopedSiteForest],
+  )
+  const visibleEntries = useMemo(
+    () => diffResult?.entries.filter(e => !rejectedDiffIds.has(e.id)) ?? [],
+    [diffResult, rejectedDiffIds],
+  )
+  // Renames are treated as intentional customizations: kept by default. They're
+  // split out so they don't count as active changes or accent the Edit-Menu
+  // rows — instead they live in a muted "Label differences" section in the
+  // Compare panel, where the user can accept individually or in bulk.
+  const renameEntries = useMemo(
+    () => visibleEntries.filter(e => e.kind === 'renamed'),
+    [visibleEntries],
+  )
+  const nonRenameEntries = useMemo(
+    () => visibleEntries.filter(e => e.kind !== 'renamed'),
+    [visibleEntries],
+  )
+  // Map a menu node id → the DiffEntry concerning it (moved/removed). Renames
+  // are excluded so they don't accent the Edit-Menu rows.
+  // Used by EditableTree rows to render badges + accept/reject controls.
+  const entriesByMenuNodeId = useMemo(() => {
+    const m = new Map<string, DiffEntry>()
+    for (const e of nonRenameEntries) {
+      if (e.kind === 'added') continue
+      m.set(e.menuNode.id, e)
+    }
+    return m
+  }, [nonRenameEntries])
+  // Diff counts for the Compare button badge and the panel header — renames are
+  // excluded (kept by default), surfaced separately as renamedCount.
+  const diffCounts = useMemo(() => {
+    const c = { added: 0, removed: 0, renamed: 0, moved: 0, total: nonRenameEntries.length }
+    for (const e of nonRenameEntries) c[e.kind] += 1
+    return c
+  }, [nonRenameEntries])
+  const renamedCount = renameEntries.length
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -471,13 +785,13 @@ export default function App() {
         <div className="flex flex-col lg:flex-row gap-4 items-start">
 
           {/* ── COL 1: Paste + Choose root ── */}
-          <div className={`w-full lg:flex-1 lg:min-w-0 space-y-4 ${expanded ? 'lg:hidden' : ''}`}>
+          <div className={`w-full lg:flex-1 lg:min-w-0 space-y-4 ${expanded || compareMode ? 'lg:hidden' : ''}`}>
 
             {/* Section 1: Paste */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
-              <SectionLabel number={1} title="Paste your site index" done={hasForest} />
+              <SectionLabel number={1} title="Paste a site index or sidenav" done={hasForest} />
               <p className="text-xs text-gray-500 mb-2">
-                Open a styled site-index page in your browser, select the visible list, copy, then paste here. Works best with a hierarchical sitemap based on <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;ul&gt;</code>, <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;li&gt;</code>, and <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;a&gt;</code> tags.
+                Open a site-index or an existing sidenav in your browser, copy it, then paste here. Works best if your paste contained a hierarchical list based on <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;ul&gt;</code>, <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;li&gt;</code>, and <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700 font-mono text-[11px]">&lt;a&gt;</code> tags.
               </p>
               <div
                 ref={pasteRef}
@@ -485,11 +799,11 @@ export default function App() {
                 suppressContentEditableWarning
                 onPaste={handlePaste}
                 className="min-h-[80px] w-full px-3 py-2 border-2 border-dashed border-blue-300 rounded-lg text-xs text-gray-600 bg-blue-50/40 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 cursor-text"
-                aria-label="Paste site index here"
+                aria-label="Paste site index or existing sidenav here"
               />
               {hasForest && (
                 <p className="mt-2 text-xs text-green-700 font-medium">
-                  ✓ Captured {pageCount} page{pageCount === 1 ? '' : 's'} across {maxDepth} level{maxDepth === 1 ? '' : 's'}.
+                  ✓ Captured {pageCount} page{pageCount === 1 ? '' : 's'} across {maxDepth} level{maxDepth === 1 ? '' : 's'}{isMenuPaste ? ' from a pasted sidenav' : ''}.
                 </p>
               )}
               {hasForest && detectedSiteUrl && (
@@ -497,18 +811,43 @@ export default function App() {
                   ✓ Detected site URL <code className="font-mono">{detectedSiteUrl}</code>
                 </p>
               )}
+              {/* Collapsed sub-menus are display:none in the rendered sidenav, so
+                  copying a rendered page drops their children from the clipboard.
+                  Pasting the source HTML keeps every level — nudge the user there
+                  if items look missing. Only relevant for sidenav pastes. */}
+              {isMenuPaste && (
+                <p className="mt-1 text-xs text-blue-700">
+                  ⓘ Items missing? Collapsed menu items aren't included when you copy. Fully expand the menu before copying, or copy its source HTML.
+                </p>
+              )}
               {parseError && (
                 <p className="mt-2 text-xs text-red-600">{parseError}</p>
               )}
-              <details className="mt-2">
-                <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">Or paste raw HTML</summary>
-                <textarea
-                  className="mt-2 w-full h-24 px-2 py-1 border border-gray-300 rounded text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="<ul><li><a href='...'>...</a></li></ul>"
-                  onChange={handlePasteAreaTextChange}
-                />
-              </details>
             </div>
+
+            {/* Compare entry: appears once a previously-generated menu is pasted.
+                Pasting a fresh site index here parses it and switches into the
+                compare layout (see handleSitePaste). Replaces the old hidden
+                paste box that lived inside ComparePanel. */}
+            {isMenuPaste && (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
+                <h2 className="text-base font-semibold text-gray-800 mb-2">Compare sidenav against a site index</h2>
+                <p className="text-xs text-gray-500 mb-2">
+                  Optionally paste a site index here to compare your sidenav to it and choose which differences to approve or reject.
+                </p>
+                <div
+                  ref={sitePasteRef}
+                  contentEditable
+                  suppressContentEditableWarning
+                  onPaste={handleSitePaste}
+                  className="min-h-[80px] w-full px-3 py-2 border-2 border-dashed border-blue-300 rounded-lg text-xs text-gray-600 bg-blue-50/40 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 cursor-text"
+                  aria-label="Paste fresh site index to compare"
+                />
+                {siteIndexParseError && (
+                  <p className="mt-2 text-xs text-red-600">{siteIndexParseError}</p>
+                )}
+              </div>
+            )}
 
             {/* Section 2: Choose root */}
             <div className={`bg-white rounded-xl shadow-sm border border-gray-100 p-4 transition-opacity
@@ -590,20 +929,37 @@ export default function App() {
           </div>
 
           {/* ── COL 2: Edit Menu ── */}
-          <div className={`w-full lg:min-w-0 ${expanded ? 'lg:flex-[3]' : 'lg:flex-1'}`}>
+          <div className={`w-full lg:min-w-0 ${expanded || compareMode ? 'lg:flex-[3]' : 'lg:flex-1'}`}>
             <div className={`bg-white rounded-xl shadow-sm border border-gray-100 p-4 transition-opacity
               ${hasForest ? 'opacity-100' : 'opacity-50 pointer-events-none'}`}>
               <div className="flex items-start justify-between gap-2">
                 <SectionLabel number={3} title="Edit Menu" done={hasForest} />
-                <button
-                  type="button"
-                  onClick={() => setExpanded(e => !e)}
-                  title={expanded ? 'Restore all panels' : 'Expand Edit Menu + Preview only'}
-                  aria-pressed={expanded}
-                  className="hidden lg:inline-flex shrink-0 items-center gap-1 text-[11px] px-2 py-1 rounded border border-gray-200 text-gray-500 hover:text-blue-700 hover:border-blue-300"
-                >
-                  {expanded ? '⤢ Collapse' : '⤢ Expand'}
-                </button>
+                <div className="flex items-center gap-1">
+                  {isMenuPaste && hasForest && (
+                    <button
+                      type="button"
+                      onClick={handleToggleCompare}
+                      title={compareMode ? 'Exit compare layout' : 'Compare with a fresh Site Index'}
+                      aria-pressed={compareMode}
+                      className={`hidden lg:inline-flex shrink-0 items-center gap-1 text-[11px] px-2 py-1 rounded border ${
+                        compareMode
+                          ? 'bg-blue-50 border-blue-300 text-blue-700'
+                          : 'border-gray-200 text-gray-500 hover:text-blue-700 hover:border-blue-300'
+                      }`}
+                    >
+                      ⇆ Compare{diffCounts.total > 0 ? ` (${diffCounts.total})` : ''}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleToggleExpand}
+                    title={expanded ? 'Restore all panels' : 'Expand Edit Menu + Preview only'}
+                    aria-pressed={expanded}
+                    className="hidden lg:inline-flex shrink-0 items-center gap-1 text-[11px] px-2 py-1 rounded border border-gray-200 text-gray-500 hover:text-blue-700 hover:border-blue-300"
+                  >
+                    {expanded ? '⤢ Collapse' : '⤢ Expand'}
+                  </button>
+                </div>
               </div>
               <div className="mb-3">
                 <AccentColorPicker value={accentColor} onChange={handleAccentColor} />
@@ -639,13 +995,42 @@ export default function App() {
                   onSetExternal={handleSetExternal}
                   onPromote={handlePromote}
                   onDemote={handleDemote}
+                  diffEntries={entriesByMenuNodeId}
+                  onAcceptDiff={handleAcceptDiff}
+                  onRejectDiff={handleRejectDiff}
+                  inCompare={siteIndexForest !== null}
                 />
               </div>
             </div>
           </div>
 
+          {/* ── COMPARE PANEL (only when compareMode) ── */}
+          {compareMode && (
+            <div className="w-full lg:flex-[3] lg:min-w-0">
+              <ComparePanel
+                siteIndexForest={siteIndexForest}
+                scopedSiteForest={scopedSiteForest}
+                menuScope={menuScope}
+                autoScope={autoScope}
+                manualScope={manualScope}
+                scopeCandidates={scopeCandidates}
+                onSetScope={handleSetScope}
+                visibleEntries={visibleEntries}
+                renameEntries={renameEntries}
+                renamedCount={renamedCount}
+                diffCounts={diffCounts}
+                categoryCount={diffResult?.unmatchedMenuCategories.length ?? 0}
+                onClear={handleClearSiteIndex}
+                onAccept={handleAcceptDiff}
+                onReject={handleRejectDiff}
+                onAcceptAllRenames={() => handleAcceptAllRenames(renameEntries)}
+                onKeepAllRenames={() => handleKeepAllRenames(renameEntries)}
+              />
+            </div>
+          )}
+
           {/* ── COL 3: Live preview ── */}
-          <div className="w-full lg:flex-1 lg:min-w-0">
+          <div className={`w-full lg:min-w-0 ${compareMode ? 'lg:flex-[2]' : 'lg:flex-1'}`}>
             <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
               <h2 className="text-base font-semibold text-gray-800 mb-2">Live preview</h2>
               {hasForest ? (
@@ -664,7 +1049,7 @@ export default function App() {
           </div>
 
           {/* ── COL 4: HTML output ── */}
-          <div className={`w-full lg:flex-1 lg:min-w-0 ${expanded ? 'lg:hidden' : ''}`}>
+          <div className={`w-full lg:flex-1 lg:min-w-0 ${expanded || compareMode ? 'lg:hidden' : ''}`}>
             <div className={`bg-white rounded-xl shadow-sm border p-4 transition-opacity
               ${hasForest ? 'border-gray-100 opacity-100' : 'border-gray-100 opacity-50 pointer-events-none'}`}>
               <SectionLabel number={4} title="Your HTML code" done={false} />
@@ -1076,6 +1461,17 @@ interface EditableTreeProps {
   onSetExternal: (id: string, external: boolean) => void
   onPromote: (id: string) => void
   onDemote: (id: string) => void
+  // Optional: when in compare mode, the parent passes a per-node-id map of
+  // DiffEntries (removed/renamed/moved — added entries live on the site-index
+  // side). Rows whose id has an entry render a badge + accept/reject buttons.
+  diffEntries?: Map<string, DiffEntry>
+  onAcceptDiff?: (entry: DiffEntry) => void
+  onRejectDiff?: (entryId: string) => void
+  // True when a site index is loaded for comparison. Drives passive
+  // "menu-only category" hints on empty-href rows — these aren't diff entries
+  // (categories can't appear in a site index by construction), but the user
+  // should still see a reminder that those rows are menu-only inventions.
+  inCompare?: boolean
 }
 
 function EditableTree({
@@ -1094,6 +1490,10 @@ function EditableTree({
   onSetExternal,
   onPromote,
   onDemote,
+  diffEntries,
+  onAcceptDiff,
+  onRejectDiff,
+  inCompare,
 }: EditableTreeProps) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
@@ -1139,6 +1539,11 @@ function EditableTree({
               onSetExternal={onSetExternal}
               onPromote={onPromote}
               onDemote={onDemote}
+              diffEntry={diffEntries?.get(node.id)}
+              diffEntries={diffEntries}
+              onAcceptDiff={onAcceptDiff}
+              onRejectDiff={onRejectDiff}
+              inCompare={inCompare}
             />
           ))}
           <li>
@@ -1174,6 +1579,14 @@ interface SortableEditableRowProps {
   onSetExternal: (id: string, external: boolean) => void
   onPromote: (id: string) => void
   onDemote: (id: string) => void
+  // Compare-mode wiring — present only when the row is involved in a diff entry.
+  diffEntry?: DiffEntry
+  // Threaded down so the nested EditableTree under this row's children can keep
+  // showing badges for descendant nodes.
+  diffEntries?: Map<string, DiffEntry>
+  onAcceptDiff?: (entry: DiffEntry) => void
+  onRejectDiff?: (entryId: string) => void
+  inCompare?: boolean
 }
 
 function SortableEditableRow({
@@ -1194,6 +1607,11 @@ function SortableEditableRow({
   onSetExternal,
   onPromote,
   onDemote,
+  diffEntry,
+  diffEntries,
+  onAcceptDiff,
+  onRejectDiff,
+  inCompare,
 }: SortableEditableRowProps) {
   const {
     attributes,
@@ -1214,9 +1632,25 @@ function SortableEditableRow({
     opacity: isDragging ? 0.6 : 1,
   }
 
+  // Category rows in compare mode get a passive gray accent — visual marker
+  // that this row is menu-only (categories never exist in a site index).
+  const isMenuOnlyCategory = !diffEntry && !!inCompare && node.href.trim() === ''
+  // Renames are surfaced in the Compare panel's "Label differences" section,
+  // not on menu rows (they never reach entriesByMenuNodeId), so only
+  // removed/moved accent the rows here.
+  const diffAccent = diffEntry
+    ? diffEntry.kind === 'removed'
+      ? 'border-l-4 border-l-red-400'
+      : diffEntry.kind === 'moved'
+      ? 'border-l-4 border-l-blue-400'
+      : ''
+    : isMenuOnlyCategory
+    ? 'border-l-4 border-l-gray-300'
+    : ''
+
   return (
     <li ref={setNodeRef} style={style}>
-      <div className={`flex items-center gap-2 px-2 py-1 rounded border ${node.included ? 'border-gray-200 bg-white' : 'border-gray-200 bg-gray-50 opacity-60'}`}>
+      <div className={`flex items-center gap-2 px-2 py-1 rounded border ${node.included ? 'border-gray-200 bg-white' : 'border-gray-200 bg-gray-50 opacity-60'} ${diffAccent}`}>
         <button
           {...(pinned ? {} : attributes)}
           {...(pinned ? {} : listeners)}
@@ -1290,7 +1724,22 @@ function SortableEditableRow({
             ×
           </button>
         )}
+        {diffEntry && onAcceptDiff && onRejectDiff && (
+          <DiffRowControls
+            entry={diffEntry}
+            onAccept={() => onAcceptDiff(diffEntry)}
+            onReject={() => onRejectDiff(diffEntry.id)}
+          />
+        )}
       </div>
+      {diffEntry && (
+        <DiffBadge entry={diffEntry} excluded={!node.included} />
+      )}
+      {isMenuOnlyCategory && (
+        <div className="ml-6 mt-1 inline-block text-[11px] px-2 py-0.5 rounded border text-gray-500 bg-gray-50 border-gray-200">
+          Menu-only category — not in site index
+        </div>
+      )}
       {urlOpen && (
         <div className="ml-6 mt-1 space-y-1">
           <div className="flex items-center gap-2">
@@ -1331,6 +1780,10 @@ function SortableEditableRow({
             onSetExternal={onSetExternal}
             onPromote={onPromote}
             onDemote={onDemote}
+            diffEntries={diffEntries}
+            onAcceptDiff={onAcceptDiff}
+            onRejectDiff={onRejectDiff}
+            inCompare={inCompare}
           />
         </div>
       )}
@@ -1436,5 +1889,362 @@ function SidenavPreview({ html, accentColor, currentPath, onSelectPath }: Sidena
       // directly so the real sidenav.js can wire up state on actual DOM nodes.
       dangerouslySetInnerHTML={{ __html: html }}
     />
+  )
+}
+
+// ── Compare-with-Site-Index UI ──────────────────────────────────────────────
+
+// Small in-row accept/reject pair. Shared between the Edit Menu (col 2) and
+// the Site Index tree (Compare panel). Accept is green ✓; reject is gray ×.
+function DiffRowControls({
+  entry,
+  onAccept,
+  onReject,
+}: {
+  entry: DiffEntry
+  onAccept: () => void
+  onReject: () => void
+}) {
+  return (
+    <span className="flex items-center gap-1 ml-1 shrink-0">
+      <button
+        type="button"
+        onClick={onAccept}
+        aria-label={`Accept ${entry.kind}`}
+        title={`Accept ${entry.kind}`}
+        className="px-1.5 py-0.5 text-xs rounded border border-green-300 text-green-700 hover:bg-green-50"
+      >
+        ✓
+      </button>
+      <button
+        type="button"
+        onClick={onReject}
+        aria-label="Reject change"
+        title="Reject change"
+        className="px-1.5 py-0.5 text-xs rounded border border-gray-300 text-gray-500 hover:bg-gray-50"
+      >
+        ×
+      </button>
+    </span>
+  )
+}
+
+// A one-line note explaining what the diff entry would do. Sits directly under
+// the row so the user sees the proposed change in context. Color matches the
+// row's left-border accent (red/amber/blue/green).
+function DiffBadge({ entry, excluded }: { entry: DiffEntry; excluded?: boolean }) {
+  let text = ''
+  let cls = ''
+  switch (entry.kind) {
+    case 'removed':
+      text = 'Removed from site index'
+      cls = 'text-red-700 bg-red-50 border-red-200'
+      break
+    case 'renamed':
+      text = `Site index label: "${entry.siteLabel}"`
+      cls = 'text-amber-700 bg-amber-50 border-amber-200'
+      break
+    case 'moved':
+      text = entry.toMenuParentLabel
+        ? `Site index puts this under "${entry.toMenuParentLabel}"`
+        : 'Site index puts this at the top level'
+      cls = 'text-blue-700 bg-blue-50 border-blue-200'
+      break
+    case 'added':
+      text = entry.suggestedMenuParentLabel
+        ? `Insert under "${entry.suggestedMenuParentLabel}"`
+        : 'Insert at the top level'
+      cls = 'text-green-700 bg-green-50 border-green-200'
+      break
+  }
+  return (
+    <div className={`ml-6 mt-1 inline-block text-[11px] px-2 py-0.5 rounded border ${cls}`}>
+      {text}
+      {excluded && <span className="text-gray-500"> (currently excluded)</span>}
+    </div>
+  )
+}
+
+// The full Compare panel that sits in the layout between Edit Menu and Live
+// Preview when compareMode is on. The site index is pasted from the box in
+// column 1 (handleSitePaste), which switches into this layout on a successful
+// parse — so by the time this panel renders it always has a site index forest:
+// it shows diff counts, then a read-only site-index tree with badges +
+// accept/reject buttons on rows that are involved in a diff entry.
+// Muted "Label differences" section. Renames are treated as intentional
+// customizations and kept by default (they don't count as active changes), so
+// this section is visually low-key (gray, not amber). Each row shows the user's
+// label → the site-index label with per-row accept (adopt site label) / keep
+// (dismiss) controls, plus bulk "Accept all" / "Keep all" buttons.
+function RenamePanel({
+  entries,
+  onAccept,
+  onReject,
+  onAcceptAll,
+  onKeepAll,
+}: {
+  entries: DiffEntry[]
+  onAccept: (entry: DiffEntry) => void
+  onReject: (entryId: string) => void
+  onAcceptAll: () => void
+  onKeepAll: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="mb-2 border border-gray-200 rounded-lg bg-gray-50/60">
+      <div className="flex items-center gap-2 px-2 py-1.5">
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          aria-expanded={open}
+          className="flex-1 min-w-0 text-left text-[11px] text-gray-600 hover:text-gray-800"
+        >
+          <span className="mr-1">{open ? '▾' : '▸'}</span>
+          {entries.length} label difference{entries.length === 1 ? '' : 's'} — your labels kept by default
+        </button>
+        <button
+          type="button"
+          onClick={onAcceptAll}
+          className="shrink-0 px-1.5 py-0.5 text-[11px] rounded border border-green-300 text-green-700 hover:bg-green-50"
+        >
+          Accept all renames
+        </button>
+        <button
+          type="button"
+          onClick={onKeepAll}
+          className="shrink-0 px-1.5 py-0.5 text-[11px] rounded border border-gray-300 text-gray-500 hover:bg-gray-100"
+        >
+          Keep all my labels
+        </button>
+      </div>
+      {open && (
+        <ul className="px-2 pb-2 space-y-1">
+          {entries.map(e => {
+            if (e.kind !== 'renamed') return null
+            return (
+              <li
+                key={e.id}
+                className="flex items-center gap-2 px-2 py-1 rounded border border-gray-200 bg-white"
+              >
+                <span className="flex-1 min-w-0 text-xs text-gray-700 truncate">
+                  <span title={e.menuNode.label}>{e.menuNode.label || '(no label)'}</span>
+                  <span className="text-gray-400"> → </span>
+                  <span className="text-gray-500" title={e.siteLabel}>{e.siteLabel || '(no label)'}</span>
+                </span>
+                <DiffRowControls
+                  entry={e}
+                  onAccept={() => onAccept(e)}
+                  onReject={() => onReject(e.id)}
+                />
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+// detectMenuScope joins segments with '/', no leading slash for relative paths
+// and host-first for absolute. For display, prefix '/' on relative (no-host)
+// scopes so users see a familiar URL-path form. '' = the whole site index.
+function formatScopeLabel(scope: string): string {
+  if (!scope) return 'entire site index'
+  return scope.includes('.') ? scope : '/' + scope
+}
+
+function ComparePanel({
+  siteIndexForest,
+  scopedSiteForest,
+  menuScope,
+  autoScope,
+  manualScope,
+  scopeCandidates,
+  onSetScope,
+  visibleEntries,
+  renameEntries,
+  renamedCount,
+  diffCounts,
+  categoryCount,
+  onClear,
+  onAccept,
+  onReject,
+  onAcceptAllRenames,
+  onKeepAllRenames,
+}: {
+  siteIndexForest: SitemapNode[] | null
+  scopedSiteForest: SitemapNode[] | null
+  menuScope: string
+  autoScope: string
+  manualScope: string | null
+  scopeCandidates: string[]
+  onSetScope: (scope: string | null) => void
+  visibleEntries: DiffEntry[]
+  renameEntries: DiffEntry[]
+  renamedCount: number
+  diffCounts: { added: number; removed: number; renamed: number; moved: number; total: number }
+  categoryCount: number
+  onClear: () => void
+  onAccept: (entry: DiffEntry) => void
+  onReject: (entryId: string) => void
+  onAcceptAllRenames: () => void
+  onKeepAllRenames: () => void
+}) {
+  const scopeLabel = formatScopeLabel(menuScope)
+  // Map site-node id → added entry. Only 'added' entries live on this side;
+  // removed/renamed/moved are surfaced on the Edit Menu rows. (Matched but
+  // unchanged site nodes render with no badge.)
+  const addedByNodeId = useMemo(() => {
+    const m = new Map<string, DiffEntry>()
+    for (const e of visibleEntries) {
+      if (e.kind === 'added') m.set(e.siteNode.id, e)
+    }
+    return m
+  }, [visibleEntries])
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <h2 className="text-base font-semibold text-gray-800">Compare with Site Index</h2>
+        {siteIndexForest && (
+          <button
+            type="button"
+            onClick={onClear}
+            className="text-[11px] text-gray-500 hover:text-blue-700 underline"
+          >
+            ⓧ Clear
+          </button>
+        )}
+      </div>
+
+      {siteIndexForest && (
+        <>
+          {/* Scope override — the menu is diffed only against this branch of the
+              site index. Always shows what was autodetected so the user can see
+              the inferred scope even after overriding it. */}
+          <div className="mb-2">
+            <label className="flex items-center gap-2 text-[11px] text-gray-600">
+              <span className="shrink-0">Compare within</span>
+              <select
+                value={manualScope === null ? '__auto__' : manualScope}
+                onChange={e => onSetScope(e.target.value === '__auto__' ? null : e.target.value)}
+                className="flex-1 min-w-0 text-[11px] border border-gray-300 rounded px-1.5 py-0.5 font-mono bg-white"
+              >
+                <option value="__auto__">Auto-detected: {formatScopeLabel(autoScope)}</option>
+                <option value="">Whole site index</option>
+                {scopeCandidates.map(c => (
+                  <option key={c} value={c}>{formatScopeLabel(c)}</option>
+                ))}
+              </select>
+            </label>
+            <p className="text-[11px] text-gray-400 mt-1">
+              Auto-detected: <code className="font-mono">{formatScopeLabel(autoScope)}</code>
+              {manualScope !== null && (
+                <> · overridden → comparing within <code className="font-mono">{scopeLabel}</code></>
+              )}
+            </p>
+          </div>
+          <div className="mb-2 text-xs text-gray-600">
+            {diffCounts.total === 0 ? (
+              <span className="text-green-700 font-medium">✓ No differences — menu matches the site index.</span>
+            ) : (
+              <span>
+                <span className="font-medium">{diffCounts.total} change{diffCounts.total === 1 ? '' : 's'}:</span>{' '}
+                {diffCounts.added > 0 && <span className="text-green-700">{diffCounts.added} added</span>}
+                {diffCounts.added > 0 && (diffCounts.removed + diffCounts.moved > 0) && ' · '}
+                {diffCounts.removed > 0 && <span className="text-red-700">{diffCounts.removed} removed</span>}
+                {diffCounts.removed > 0 && diffCounts.moved > 0 && ' · '}
+                {diffCounts.moved > 0 && <span className="text-blue-700">{diffCounts.moved} moved</span>}
+              </span>
+            )}
+            {categoryCount > 0 && (
+              <span className="text-gray-500">
+                {' '}· {categoryCount} menu-only categor{categoryCount === 1 ? 'y' : 'ies'} preserved
+              </span>
+            )}
+          </div>
+          {renamedCount > 0 && (
+            <RenamePanel
+              entries={renameEntries}
+              onAccept={onAccept}
+              onReject={onReject}
+              onAcceptAll={onAcceptAllRenames}
+              onKeepAll={onKeepAllRenames}
+            />
+          )}
+          <div className="border border-gray-200 rounded-lg max-h-[640px] overflow-auto p-2">
+            <SiteIndexTree
+              nodes={scopedSiteForest ?? siteIndexForest}
+              addedByNodeId={addedByNodeId}
+              onAccept={onAccept}
+              onReject={onReject}
+            />
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// Read-only render of the parsed site index. Rows whose ids appear in
+// `addedByNodeId` get a green accent + accept/reject buttons (these are the
+// 'added' diff entries — pages present in the site index but missing from the
+// menu). All other rows render plain so the user can scan unchanged content.
+function SiteIndexTree({
+  nodes,
+  addedByNodeId,
+  onAccept,
+  onReject,
+}: {
+  nodes: SitemapNode[]
+  addedByNodeId: Map<string, DiffEntry>
+  onAccept: (entry: DiffEntry) => void
+  onReject: (entryId: string) => void
+}) {
+  return (
+    <ul className="space-y-1">
+      {nodes.map(n => {
+        const entry = addedByNodeId.get(n.id)
+        const isCategory = n.href.trim() === ''
+        return (
+          <li key={n.id}>
+            <div
+              className={`flex items-center gap-2 px-2 py-1 rounded border ${
+                entry ? 'border-green-200 bg-green-50/40 border-l-4 border-l-green-400' : 'border-gray-200 bg-white'
+              }`}
+            >
+              <span className={`flex-1 min-w-0 text-xs truncate ${isCategory ? 'italic text-gray-500' : 'text-gray-700'}`}>
+                {n.label || '(no label)'}
+              </span>
+              {n.href && (
+                <code className="shrink-0 text-[10px] font-mono text-gray-400 truncate max-w-[180px]" title={n.href}>
+                  {n.href}
+                </code>
+              )}
+              {entry && (
+                <DiffRowControls
+                  entry={entry}
+                  onAccept={() => onAccept(entry)}
+                  onReject={() => onReject(entry.id)}
+                />
+              )}
+            </div>
+            {entry && (
+              <DiffBadge entry={entry} />
+            )}
+            {n.children.length > 0 && (
+              <div className="ml-6 mt-1">
+                <SiteIndexTree
+                  nodes={n.children}
+                  addedByNodeId={addedByNodeId}
+                  onAccept={onAccept}
+                  onReject={onReject}
+                />
+              </div>
+            )}
+          </li>
+        )
+      })}
+    </ul>
   )
 }

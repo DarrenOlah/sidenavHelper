@@ -1,10 +1,71 @@
 import { describe, it, expect } from 'vitest'
-import { parseSitemapHtml } from './sitemap'
+import { parseSitemapHtml, parseBestSitemap, generateSidenavHtml } from './sitemap'
+
+describe('parseBestSitemap', () => {
+  // When you copy raw source from a code editor / view-source pane, the
+  // text/html flavor is a syntax-highlighted rendering — styling spans with the
+  // angle brackets escaped to entities, no real <ul>/<li>/<a>. The real markup
+  // lives in text/plain. parseBestSitemap must keep the text/plain parse.
+  it('prefers text/plain when text/html is syntax-highlight noise', () => {
+    const noise =
+      '<div class="hl"><span style="color:#000">&lt;ul&gt;&lt;li&gt;&lt;a href="/a/"&gt;A&lt;/a&gt;&lt;/li&gt;&lt;/ul&gt;</span></div>'
+    const realMarkup = '<ul><li><a href="/a/">A</a><ul><li><a href="/a/b/">B</a></li></ul></li></ul>'
+    const { result, source } = parseBestSitemap(noise, realMarkup)
+    expect(result.pageCount).toBe(2)
+    expect(result.forest[0].label).toBe('A')
+    expect(source).toBe(realMarkup)
+  })
+
+  // Copying a rendered page gives real DOM in text/html and flattened text in
+  // text/plain — keep the richer text/html parse (ties favor text/html).
+  it('prefers text/html when it carries the real rendered tree', () => {
+    const realHtml = '<ul><li><a href="/a/">A</a><ul><li><a href="/a/b/">B</a></li></ul></li></ul>'
+    const flattened = 'A\nB'
+    const { result, source } = parseBestSitemap(realHtml, flattened)
+    expect(result.pageCount).toBe(2)
+    expect(source).toBe(realHtml)
+  })
+
+  it('returns an empty result when both flavors are empty', () => {
+    const { result, source } = parseBestSitemap('', '')
+    expect(result.forest).toEqual([])
+    expect(result.pageCount).toBe(0)
+    expect(source).toBe('')
+  })
+
+  it('falls back to whichever single flavor is present', () => {
+    const markup = '<ul><li><a href="/a/">A</a></li></ul>'
+    expect(parseBestSitemap(markup, '').source).toBe(markup)
+    expect(parseBestSitemap('', markup).source).toBe(markup)
+  })
+})
 
 describe('parseSitemapHtml', () => {
   it('returns an empty forest for empty input', () => {
-    expect(parseSitemapHtml('')).toEqual({ forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '' })
-    expect(parseSitemapHtml('   ')).toEqual({ forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '' })
+    expect(parseSitemapHtml('')).toEqual({ forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '', isAuSidenavOutput: false })
+    expect(parseSitemapHtml('   ')).toEqual({ forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '', isAuSidenavOutput: false })
+  })
+
+  describe('isAuSidenavOutput', () => {
+    it('is true for output produced by generateSidenavHtml (round-trip)', () => {
+      const seed = parseSitemapHtml(`<ul><li><a href="/a/">A</a><ul><li><a href="/a/b/">B</a></li></ul></li></ul>`)
+      const html = generateSidenavHtml(seed.forest)
+      expect(parseSitemapHtml(html).isAuSidenavOutput).toBe(true)
+    })
+
+    it('is true when only the .au-sidenav__sublist marker is present', () => {
+      const html = `<ul class="au-sidenav__list"><li><a href="/a/">A</a><ul class="au-sidenav__sublist"><li><a href="/a/b/">B</a></li></ul></li></ul>`
+      expect(parseSitemapHtml(html).isAuSidenavOutput).toBe(true)
+    })
+
+    it('is false for a plain site-index <ul>/<li>/<a> tree', () => {
+      const html = `<ul><li><a href="/a/">A</a><ul><li><a href="/a/b/">B</a></li></ul></li></ul>`
+      expect(parseSitemapHtml(html).isAuSidenavOutput).toBe(false)
+    })
+
+    it('is false for empty input', () => {
+      expect(parseSitemapHtml('').isAuSidenavOutput).toBe(false)
+    })
   })
 
   describe('detectedHeaderText', () => {
