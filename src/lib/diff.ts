@@ -444,64 +444,107 @@ function isPathOnlyHref(href: string): boolean {
   }
 }
 
-// Dominant URL-path prefix among the menu's internal-looking hrefs. Returns
-// the segment-joined string (e.g. 'programs' — never includes a host since the
-// internal normalizer strips it) or '' when nothing dominates.
-//
-// "Internal-looking" means: not external, OR path-only (relative). The
-// path-only fallback is critical when applySiteUrl misclassified internal
-// links as external — see isPathOnlyHref above.
-//
-// Algorithm: majority-voting per depth. At each level, pick the segment with a
-// strict majority (> 50% of remaining candidates) and recurse on that subset.
-// Stop on tie or sub-majority. This tolerates outliers — a single
-// '/Portals/...' resource link tucked into a menu otherwise built around
-// '/USAWC-AFPIMS/...' no longer kills detection.
+// True when a node is an internal-looking page link: it has an href and is
+// either not flagged external or is path-only (relative). The path-only
+// fallback is critical when applySiteUrl misclassified internal links as
+// external — see isPathOnlyHref above.
+function isInternalLooking(node: SitemapNode): boolean {
+  return !!node.href && (!node.external || isPathOnlyHref(node.href))
+}
+
+// Collect one representative path per "effective top-level branch" of the menu:
+// the SHALLOWEST URL-bearing node reachable from each forest root. We descend
+// through empty-href logical categories, but stop the moment we hit a
+// URL-bearing node — we never look at its descendants. This is the key fix over
+// the old all-descendants vote: a deep, populous sub-branch can no longer
+// out-weigh shallow siblings and capture the scope.
+function effectiveTopLevelBranchPaths(menuForest: SitemapNode[]): string[][] {
+  const out: string[][] = []
+  function collect(node: SitemapNode): void {
+    if (isInternalLooking(node)) {
+      const segs = hrefSegments(normalizeHrefForMatch(node.href))
+      if (segs.length > 0) {
+        out.push(segs)
+        return // STOP — do not descend past a URL-bearing node
+      }
+    }
+    for (const child of node.children) collect(child)
+  }
+  for (const root of menuForest) collect(root)
+  return out
+}
+
+// Segment-wise longest common prefix across paths (atomic segments — no
+// substring matching). Empty input → [].
+function segmentwiseCommonPrefix(paths: string[][]): string[] {
+  if (paths.length === 0) return []
+  const prefix: string[] = []
+  const first = paths[0]
+  for (let depth = 0; depth < first.length; depth++) {
+    const seg = first[depth]
+    if (paths.every(p => p.length > depth && p[depth] === seg)) prefix.push(seg)
+    else break
+  }
+  return prefix
+}
+
+// Common prefix across branches, tolerating a single outlier. With < 3
+// branches, a disagreeing pair is genuinely ambiguous → []. With 3+, we may
+// drop exactly one branch (e.g. a stray '/Portals/x.pdf' resource link) if
+// doing so reveals a prefix — but only when every viable single-removal yields
+// the SAME prefix; otherwise the menu is genuinely multi-rooted → [].
+function commonPrefixWithOutlierTolerance(branches: string[][]): string[] {
+  const full = segmentwiseCommonPrefix(branches)
+  if (full.length > 0) return full
+  if (branches.length < 3) return []
+  let best: string[] | null = null
+  for (let i = 0; i < branches.length; i++) {
+    const survivors = branches.filter((_, j) => j !== i)
+    const p = segmentwiseCommonPrefix(survivors)
+    if (p.length === 0) continue
+    if (best === null) best = p
+    else if (!segmentsEqual(best, p)) return [] // distinct roots → no scope
+  }
+  return best ?? []
+}
+
+// Dominant URL-path prefix shared by the menu's effective top-level branches.
+// Returns the segment-joined string (e.g. 'programs' — never includes a host
+// since the internal normalizer strips it) or '' when nothing dominates.
 //
 // Relative and absolute forms of the same internal page produce the same
 // segments — '/AMSC/News/' and 'https://example.com/AMSC/News/' both become
 // ['amsc', 'news'] via normalizeHrefForMatch — so a relative menu and an
 // absolute site index match correctly.
 export function detectMenuScope(menuForest: SitemapNode[]): string {
-  const paths: string[][] = []
-  function walk(nodes: SitemapNode[]): void {
-    for (const n of nodes) {
-      if (n.href && (!n.external || isPathOnlyHref(n.href))) {
-        const segs = hrefSegments(normalizeHrefForMatch(n.href))
-        if (segs.length > 0) paths.push(segs)
-      }
-      walk(n.children)
-    }
-  }
-  walk(menuForest)
-  if (paths.length === 0) return ''
+  const branches = effectiveTopLevelBranchPaths(menuForest)
+  if (branches.length === 0) return ''
+  if (branches.length === 1) return branches[0].join('/')
+  return commonPrefixWithOutlierTolerance(branches).join('/')
+}
 
-  const result: string[] = []
-  let candidates = paths
-  while (candidates.length > 0) {
-    const depth = result.length
-    const counts = new Map<string, number>()
-    for (const p of candidates) {
-      if (p.length <= depth) continue
-      const seg = p[depth]
-      counts.set(seg, (counts.get(seg) ?? 0) + 1)
-    }
-    if (counts.size === 0) break
-    let topSeg: string | null = null
-    let topCount = 0
-    let tied = false
-    for (const [seg, c] of counts) {
-      if (c > topCount) { topSeg = seg; topCount = c; tied = false }
-      else if (c === topCount) tied = true
-    }
-    if (tied || topSeg === null) break
-    // Strict majority required — guards against committing to a segment that
-    // only barely edges out alternatives on noisy small inputs.
-    if (topCount * 2 <= candidates.length) break
-    result.push(topSeg)
-    candidates = candidates.filter(p => p.length > depth && p[depth] === topSeg)
+// Candidate scopes the user can pick from the manual-override control: the
+// ancestor chain of the auto-detected scope (shallow → deep) plus each
+// effective top-level branch's first segment. Deduped, order-preserving. The
+// UI adds its own "Auto" and "Whole site index" choices on top of this list.
+export function listScopeCandidates(menuForest: SitemapNode[]): string[] {
+  const auto = detectMenuScope(menuForest)
+  const seen = new Set<string>()
+  const out: string[] = []
+  const push = (v: string) => {
+    if (!v || seen.has(v)) return
+    seen.add(v)
+    out.push(v)
   }
-  return result.join('/')
+  // Ancestor chain of the auto scope: 'a', 'a/b', 'a/b/c'.
+  const autoSegs = hrefSegments(auto)
+  for (let i = 1; i <= autoSegs.length; i++) push(autoSegs.slice(0, i).join('/'))
+  // First segment of each top-level branch (covers sibling roots the auto
+  // scope may have collapsed away).
+  for (const branch of effectiveTopLevelBranchPaths(menuForest)) {
+    if (branch.length > 0) push(branch[0])
+  }
+  return out
 }
 
 function segmentsEqual(a: string[], b: string[]): boolean {

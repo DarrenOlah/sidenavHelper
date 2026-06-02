@@ -3,6 +3,7 @@ import {
   diffForests,
   applyDiff,
   detectMenuScope,
+  listScopeCandidates,
   filterSiteIndexByScope,
   detectSiblingModeRoot,
   __resetCloneCounter,
@@ -363,6 +364,127 @@ describe('detectMenuScope', () => {
       n('b2', '/about/q', 'Q'),
     ]
     expect(detectMenuScope(menu)).toBe('')
+  })
+
+  it('does NOT over-descend into a deep, populous sub-branch (ASEP regression)', () => {
+    // The headline bug: the old all-descendants majority vote descended into
+    // /ASEP/General-Officer-Education/Joint-Education-Courses/ (10 leaf children
+    // dominated the vote), abandoning the About + Nominative siblings. The
+    // correct scope is the shallow common root, 'asep'.
+    const menu = [
+      n('home', '/ASEP/', 'ASEP Home'),
+      n('about', '/ASEP/About/', 'About'),
+      n('goe', '/ASEP/General-Officer-Education/', 'General Officer Education', [
+        n('acc', '/ASEP/General-Officer-Education/Army-Core-Courses/', 'Army Core Courses', [
+          n('slds', '/ASEP/General-Officer-Education/Army-Core-Courses/SLDS/', 'SLDS'),
+          n('aa', '/ASEP/General-Officer-Education/Army-Core-Courses/ASEP-A/', 'ASEP-A'),
+        ]),
+        n('jec', '/ASEP/General-Officer-Education/Joint-Education-Courses/', 'Joint Education Courses', [
+          n('cap', '/ASEP/General-Officer-Education/Joint-Education-Courses/Capstone/', 'Capstone'),
+          n('pin', '/ASEP/General-Officer-Education/Joint-Education-Courses/Pinnacle/', 'Pinnacle'),
+          n('jflcc', '/ASEP/General-Officer-Education/Joint-Education-Courses/C-JFLCC/', 'C/JFLCC'),
+          n('jfowc', '/ASEP/General-Officer-Education/Joint-Education-Courses/JFOWC/', 'JFOWC'),
+          n('jfacc', '/ASEP/General-Officer-Education/Joint-Education-Courses/JFACC-CFACC/', 'JFACC'),
+          n('jfmcc', '/ASEP/General-Officer-Education/Joint-Education-Courses/JFMCC-CFMCC/', 'JFMCC'),
+          n('jsocc', '/ASEP/General-Officer-Education/Joint-Education-Courses/C-JFSOCC/', 'C/JFSOCC'),
+          n('sjioac', '/ASEP/General-Officer-Education/Joint-Education-Courses/SJIOAC/', 'SJIOAC'),
+          n('coec', '/ASEP/General-Officer-Education/Joint-Education-Courses/COEC/', 'COEC'),
+          n('sidmc', '/ASEP/General-Officer-Education/Joint-Education-Courses/SIDMC/', 'SIDMC'),
+        ]),
+        n('psc', '/ASEP/General-Officer-Education/Positional-and-Selective-Courses/', 'Positional and Selective Courses'),
+      ]),
+      n('nle', '/ASEP/Nominative-Leader-Education/', 'Nominative Leader Education', [
+        n('nlc', '/ASEP/Nominative-Leader-Education/NLC/', 'NLC'),
+        n('nss', '/ASEP/Nominative-Leader-Education/NSS/', 'NSS'),
+      ]),
+    ]
+    expect(detectMenuScope(menu)).toBe('asep')
+  })
+
+  it('tolerates a single outlier among 3+ top-level branches', () => {
+    // Three forest roots; only dropping the lone /y/ branch reveals a prefix,
+    // and it is unique → 'x'.
+    const menu = [n('a', '/x/a', 'A'), n('b', '/x/b', 'B'), n('c', '/y/c', 'C')]
+    expect(detectMenuScope(menu)).toBe('x')
+  })
+
+  it('returns empty when 3+ branches have multiple distinct roots', () => {
+    // Every single-removal still leaves two distinct roots → ambiguous → ''.
+    const menu = [n('a', '/x/a', 'A'), n('b', '/y/b', 'B'), n('c', '/z/c', 'C')]
+    expect(detectMenuScope(menu)).toBe('')
+  })
+})
+
+describe('listScopeCandidates', () => {
+  it('returns the ancestor chain of the auto scope plus top-level branch roots', () => {
+    const menu = [
+      n('home', '/ASEP/', 'ASEP Home'),
+      n('about', '/ASEP/About/', 'About'),
+      n('goe', '/ASEP/General-Officer-Education/', 'GOE', [
+        n('jec', '/ASEP/General-Officer-Education/Joint-Education-Courses/', 'JEC'),
+      ]),
+    ]
+    // Auto scope is 'asep' (one segment), so the chain is just ['asep']; each
+    // top-level branch's first segment is also 'asep' → deduped to ['asep'].
+    expect(listScopeCandidates(menu)).toEqual(['asep'])
+  })
+
+  it('lists deeper chain segments when the auto scope is multi-segment', () => {
+    // Single branch → auto scope is the full path; candidates expose each
+    // ancestor level so the user can widen the comparison.
+    const menu = [n('a', '/programs/advanced/x', 'X')]
+    expect(listScopeCandidates(menu)).toEqual(['programs', 'programs/advanced', 'programs/advanced/x'])
+  })
+})
+
+describe('detectMenuScope + filterSiteIndexByScope — ASEP end-to-end', () => {
+  it('scopes to the ASEP subtree and reports renames (not false removed/moved)', () => {
+    // Sibling-mode menu (ASEP Home is the leaf landing page, the rest are its
+    // siblings) — the same shape the app reshapes on paste. The user gave the
+    // courses longer labels than the terse site-index names.
+    const flatMenu = [
+      n('home', '/ASEP/', 'ASEP Home'),
+      n('about', '/ASEP/About/', 'About'),
+      n('nle', '/ASEP/Nominative-Leader-Education/', 'Nominative Leader Education', [
+        n('nlc', '/ASEP/Nominative-Leader-Education/NLC/', 'Nominative Leader Course (NLC)'),
+      ]),
+    ]
+    // Mirror the app's paste pipeline: reshape sibling-mode into nested form so
+    // the root's children aren't flagged as phantom moves.
+    const sibling = detectSiblingModeRoot(flatMenu)!
+    expect(sibling).toEqual({ rootIndex: 0 })
+    const root = flatMenu[sibling.rootIndex]
+    const rest = flatMenu.filter((_, i) => i !== sibling.rootIndex)
+    const menu = [{ ...root, children: rest }]
+
+    // Full site index: an unrelated AMSC branch + the authoritative ASEP branch
+    // (absolute URLs, terse labels).
+    const site = [
+      n('amsc', 'https://x.mil/AMSC/', 'AMSC', [
+        n('amscnews', 'https://x.mil/AMSC/News/', 'News'),
+      ]),
+      n('asep', 'https://x.mil/ASEP/', 'ASEP', [
+        n('sabout', 'https://x.mil/ASEP/About/', 'About'),
+        n('snle', 'https://x.mil/ASEP/Nominative-Leader-Education/', 'Nominative Leader Education', [
+          n('snlc', 'https://x.mil/ASEP/Nominative-Leader-Education/NLC/', 'NLC'),
+        ]),
+      ]),
+    ]
+    const scope = detectMenuScope(menu)
+    expect(scope).toBe('asep')
+    const scoped = filterSiteIndexByScope(site, scope, menu)
+    // Menu contains /ASEP/ → scope root included as the single forest root.
+    expect(scoped).toHaveLength(1)
+    expect(scoped[0].label).toBe('ASEP')
+
+    const { entries } = diffForests(menu, scoped)
+    // The unrelated AMSC branch is out of scope → never surfaces as removed.
+    expect(entries.some(e => e.kind === 'removed')).toBe(false)
+    // Everything lines up structurally → no false moves.
+    expect(entries.some(e => e.kind === 'moved')).toBe(false)
+    // The deliberately-renamed NLC is correctly a rename (menu long, site terse).
+    const renamed = entries.filter(e => e.kind === 'renamed')
+    expect(renamed.some(e => e.kind === 'renamed' && e.siteLabel === 'NLC')).toBe(true)
   })
 })
 

@@ -77,6 +77,7 @@ import {
   diffForests,
   applyDiff,
   detectMenuScope,
+  listScopeCandidates,
   filterSiteIndexByScope,
   detectSiblingModeRoot,
   type DiffEntry,
@@ -137,6 +138,11 @@ interface State {
   // tracking because applyDiff mutates the menu forest and they fall out of
   // the next diff naturally.
   rejectedDiffIds: Set<string>
+  // Manual override for the compare scope (which site-index branch the menu is
+  // diffed against). null = use the autodetected scope; '' = explicit whole
+  // site index; any other value = an explicit branch prefix. Resets to null on
+  // every new paste so a stale override never silently mis-scopes a new menu.
+  manualScope: string | null
 }
 
 const INITIAL_STATE: State = {
@@ -161,6 +167,7 @@ const INITIAL_STATE: State = {
   siteIndexForest: null,
   siteIndexParseError: '',
   rejectedDiffIds: new Set(),
+  manualScope: null,
 }
 
 // ── Asset download (panel 4) ─────────────────────────────────────────────────
@@ -252,7 +259,7 @@ export default function App() {
   const pasteRef = useRef<HTMLDivElement | null>(null)
   const sitePasteRef = useRef<HTMLDivElement | null>(null)
 
-  const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, accentColor, pageCount, maxDepth, parseError, previewCurrentPath, addedIds, siteUrl, detectedSiteUrl, detectedSiteUrls, isMenuPaste, siteIndexForest, siteIndexParseError, rejectedDiffIds } = state
+  const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, accentColor, pageCount, maxDepth, parseError, previewCurrentPath, addedIds, siteUrl, detectedSiteUrl, detectedSiteUrls, isMenuPaste, siteIndexForest, siteIndexParseError, rejectedDiffIds, manualScope } = state
 
   const hasForest = forest.length > 0
   const hasPickedRoot = rootId !== null && findNode(forest, rootId) !== null
@@ -312,6 +319,7 @@ export default function App() {
         siteIndexForest: null,
         siteIndexParseError: '',
         rejectedDiffIds: new Set(),
+        manualScope: null,
       }))
       setCompareMode(false)
       return
@@ -363,6 +371,7 @@ export default function App() {
       siteIndexForest: null,
       siteIndexParseError: '',
       rejectedDiffIds: new Set(),
+      manualScope: null,
     }))
     // Exit compare mode whenever the menu changes — the previous comparison
     // doesn't apply to the new paste.
@@ -401,6 +410,9 @@ export default function App() {
         // A fresh site index supersedes any previously-rejected entries —
         // they were keyed against the previous diff and may not match anymore.
         rejectedDiffIds: new Set(),
+        // A fresh site index also clears any manual scope override — the new
+        // index may have a different shape than the one the user scoped against.
+        manualScope: null,
       }
     })
     return true
@@ -432,6 +444,7 @@ export default function App() {
       siteIndexForest: null,
       siteIndexParseError: '',
       rejectedDiffIds: new Set(),
+      manualScope: null,
     }))
     // Drop back to the default layout so the (now-only) site-index paste box
     // in column 1 is visible again for a re-paste.
@@ -460,6 +473,35 @@ export default function App() {
       const next = new Set(s.rejectedDiffIds)
       next.add(entryId)
       return { ...s, rejectedDiffIds: next }
+    })
+  }
+
+  // Manual compare-scope override. null = autodetect, '' = whole site index,
+  // otherwise an explicit branch prefix. Fed into filterSiteIndexByScope.
+  const handleSetScope = (scope: string | null) => {
+    setState(s => ({ ...s, manualScope: scope }))
+  }
+
+  // Bulk rename controls. Renames are kept by default (excluded from the active
+  // change count), so these let the user resolve the whole batch at once.
+  // "Keep all" dismisses every rename entry; "Accept all" applies every
+  // site-index label. Entries are passed in (captured from the current diff) so
+  // the handlers don't depend on stale closure state.
+  const handleKeepAllRenames = (entries: DiffEntry[]) => {
+    setState(s => {
+      const next = new Set(s.rejectedDiffIds)
+      for (const e of entries) next.add(e.id)
+      return { ...s, rejectedDiffIds: next }
+    })
+  }
+
+  const handleAcceptAllRenames = (entries: DiffEntry[]) => {
+    setState(s => {
+      // Renames only touch labels (not structure), so folding applyDiff over
+      // one forest accumulator is order-independent and has no id staleness.
+      let nextForest = s.forest
+      for (const e of entries) nextForest = applyDiff(nextForest, e)
+      return { ...s, forest: nextForest }
     })
   }
 
@@ -652,11 +694,17 @@ export default function App() {
     if (sitePasteRef.current) sitePasteRef.current.innerHTML = ''
   }
 
-  // Infer the menu's original branch from its hrefs — the longest URL-path
-  // shared by every non-external, non-empty menu href. When non-empty, the
-  // diff only compares within that subtree of the site index, hiding noise
-  // from pages outside the user's original root pick.
-  const menuScope = useMemo(() => detectMenuScope(forest), [forest])
+  // Infer the menu's original branch from its hrefs — the common URL-path
+  // prefix of the menu's top-level branches. When non-empty, the diff only
+  // compares within that subtree of the site index, hiding noise from pages
+  // outside the user's original root pick.
+  const autoScope = useMemo(() => detectMenuScope(forest), [forest])
+  // Effective scope: the manual override when set, else the autodetected scope.
+  // Uses ?? (not ||) so an explicit '' (whole site index) is honored.
+  const menuScope = manualScope ?? autoScope
+  // Candidate branches the manual-override control offers (in addition to its
+  // own "Auto" and "Whole site index" choices).
+  const scopeCandidates = useMemo(() => listScopeCandidates(forest), [forest])
   const scopedSiteForest = useMemo(
     () => siteIndexForest ? filterSiteIndexByScope(siteIndexForest, menuScope, forest) : null,
     [siteIndexForest, menuScope, forest],
@@ -674,22 +722,37 @@ export default function App() {
     () => diffResult?.entries.filter(e => !rejectedDiffIds.has(e.id)) ?? [],
     [diffResult, rejectedDiffIds],
   )
-  // Map a menu node id → the DiffEntry concerning it (renamed/moved/removed).
+  // Renames are treated as intentional customizations: kept by default. They're
+  // split out so they don't count as active changes or accent the Edit-Menu
+  // rows — instead they live in a muted "Label differences" section in the
+  // Compare panel, where the user can accept individually or in bulk.
+  const renameEntries = useMemo(
+    () => visibleEntries.filter(e => e.kind === 'renamed'),
+    [visibleEntries],
+  )
+  const nonRenameEntries = useMemo(
+    () => visibleEntries.filter(e => e.kind !== 'renamed'),
+    [visibleEntries],
+  )
+  // Map a menu node id → the DiffEntry concerning it (moved/removed). Renames
+  // are excluded so they don't accent the Edit-Menu rows.
   // Used by EditableTree rows to render badges + accept/reject controls.
   const entriesByMenuNodeId = useMemo(() => {
     const m = new Map<string, DiffEntry>()
-    for (const e of visibleEntries) {
+    for (const e of nonRenameEntries) {
       if (e.kind === 'added') continue
       m.set(e.menuNode.id, e)
     }
     return m
-  }, [visibleEntries])
-  // Diff counts for the Compare button badge and the panel header.
+  }, [nonRenameEntries])
+  // Diff counts for the Compare button badge and the panel header — renames are
+  // excluded (kept by default), surfaced separately as renamedCount.
   const diffCounts = useMemo(() => {
-    const c = { added: 0, removed: 0, renamed: 0, moved: 0, total: visibleEntries.length }
-    for (const e of visibleEntries) c[e.kind] += 1
+    const c = { added: 0, removed: 0, renamed: 0, moved: 0, total: nonRenameEntries.length }
+    for (const e of nonRenameEntries) c[e.kind] += 1
     return c
-  }, [visibleEntries])
+  }, [nonRenameEntries])
+  const renamedCount = renameEntries.length
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -948,12 +1011,20 @@ export default function App() {
                 siteIndexForest={siteIndexForest}
                 scopedSiteForest={scopedSiteForest}
                 menuScope={menuScope}
+                autoScope={autoScope}
+                manualScope={manualScope}
+                scopeCandidates={scopeCandidates}
+                onSetScope={handleSetScope}
                 visibleEntries={visibleEntries}
+                renameEntries={renameEntries}
+                renamedCount={renamedCount}
                 diffCounts={diffCounts}
                 categoryCount={diffResult?.unmatchedMenuCategories.length ?? 0}
                 onClear={handleClearSiteIndex}
                 onAccept={handleAcceptDiff}
                 onReject={handleRejectDiff}
+                onAcceptAllRenames={() => handleAcceptAllRenames(renameEntries)}
+                onKeepAllRenames={() => handleKeepAllRenames(renameEntries)}
               />
             </div>
           )}
@@ -1564,11 +1635,12 @@ function SortableEditableRow({
   // Category rows in compare mode get a passive gray accent — visual marker
   // that this row is menu-only (categories never exist in a site index).
   const isMenuOnlyCategory = !diffEntry && !!inCompare && node.href.trim() === ''
+  // Renames are surfaced in the Compare panel's "Label differences" section,
+  // not on menu rows (they never reach entriesByMenuNodeId), so only
+  // removed/moved accent the rows here.
   const diffAccent = diffEntry
     ? diffEntry.kind === 'removed'
       ? 'border-l-4 border-l-red-400'
-      : diffEntry.kind === 'renamed'
-      ? 'border-l-4 border-l-amber-400'
       : diffEntry.kind === 'moved'
       ? 'border-l-4 border-l-blue-400'
       : ''
@@ -1899,31 +1971,126 @@ function DiffBadge({ entry, excluded }: { entry: DiffEntry; excluded?: boolean }
 // parse — so by the time this panel renders it always has a site index forest:
 // it shows diff counts, then a read-only site-index tree with badges +
 // accept/reject buttons on rows that are involved in a diff entry.
+// Muted "Label differences" section. Renames are treated as intentional
+// customizations and kept by default (they don't count as active changes), so
+// this section is visually low-key (gray, not amber). Each row shows the user's
+// label → the site-index label with per-row accept (adopt site label) / keep
+// (dismiss) controls, plus bulk "Accept all" / "Keep all" buttons.
+function RenamePanel({
+  entries,
+  onAccept,
+  onReject,
+  onAcceptAll,
+  onKeepAll,
+}: {
+  entries: DiffEntry[]
+  onAccept: (entry: DiffEntry) => void
+  onReject: (entryId: string) => void
+  onAcceptAll: () => void
+  onKeepAll: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="mb-2 border border-gray-200 rounded-lg bg-gray-50/60">
+      <div className="flex items-center gap-2 px-2 py-1.5">
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          aria-expanded={open}
+          className="flex-1 min-w-0 text-left text-[11px] text-gray-600 hover:text-gray-800"
+        >
+          <span className="mr-1">{open ? '▾' : '▸'}</span>
+          {entries.length} label difference{entries.length === 1 ? '' : 's'} — your labels kept by default
+        </button>
+        <button
+          type="button"
+          onClick={onAcceptAll}
+          className="shrink-0 px-1.5 py-0.5 text-[11px] rounded border border-green-300 text-green-700 hover:bg-green-50"
+        >
+          Accept all renames
+        </button>
+        <button
+          type="button"
+          onClick={onKeepAll}
+          className="shrink-0 px-1.5 py-0.5 text-[11px] rounded border border-gray-300 text-gray-500 hover:bg-gray-100"
+        >
+          Keep all my labels
+        </button>
+      </div>
+      {open && (
+        <ul className="px-2 pb-2 space-y-1">
+          {entries.map(e => {
+            if (e.kind !== 'renamed') return null
+            return (
+              <li
+                key={e.id}
+                className="flex items-center gap-2 px-2 py-1 rounded border border-gray-200 bg-white"
+              >
+                <span className="flex-1 min-w-0 text-xs text-gray-700 truncate">
+                  <span title={e.menuNode.label}>{e.menuNode.label || '(no label)'}</span>
+                  <span className="text-gray-400"> → </span>
+                  <span className="text-gray-500" title={e.siteLabel}>{e.siteLabel || '(no label)'}</span>
+                </span>
+                <DiffRowControls
+                  entry={e}
+                  onAccept={() => onAccept(e)}
+                  onReject={() => onReject(e.id)}
+                />
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+// detectMenuScope joins segments with '/', no leading slash for relative paths
+// and host-first for absolute. For display, prefix '/' on relative (no-host)
+// scopes so users see a familiar URL-path form. '' = the whole site index.
+function formatScopeLabel(scope: string): string {
+  if (!scope) return 'entire site index'
+  return scope.includes('.') ? scope : '/' + scope
+}
+
 function ComparePanel({
   siteIndexForest,
   scopedSiteForest,
   menuScope,
+  autoScope,
+  manualScope,
+  scopeCandidates,
+  onSetScope,
   visibleEntries,
+  renameEntries,
+  renamedCount,
   diffCounts,
   categoryCount,
   onClear,
   onAccept,
   onReject,
+  onAcceptAllRenames,
+  onKeepAllRenames,
 }: {
   siteIndexForest: SitemapNode[] | null
   scopedSiteForest: SitemapNode[] | null
   menuScope: string
+  autoScope: string
+  manualScope: string | null
+  scopeCandidates: string[]
+  onSetScope: (scope: string | null) => void
   visibleEntries: DiffEntry[]
+  renameEntries: DiffEntry[]
+  renamedCount: number
   diffCounts: { added: number; removed: number; renamed: number; moved: number; total: number }
   categoryCount: number
   onClear: () => void
   onAccept: (entry: DiffEntry) => void
   onReject: (entryId: string) => void
+  onAcceptAllRenames: () => void
+  onKeepAllRenames: () => void
 }) {
-  // detectMenuScope joins segments with '/', no leading slash for relative
-  // paths and host-first for absolute. For display, prefix '/' on relative
-  // (no-host) scopes so users see a familiar URL-path form.
-  const scopeLabel = menuScope.includes('.') ? menuScope : '/' + menuScope
+  const scopeLabel = formatScopeLabel(menuScope)
   // Map site-node id → added entry. Only 'added' entries live on this side;
   // removed/renamed/moved are surfaced on the Edit Menu rows. (Matched but
   // unchanged site nodes render with no badge.)
@@ -1952,11 +2119,31 @@ function ComparePanel({
 
       {siteIndexForest && (
         <>
-          {menuScope && (
-            <p className="text-[11px] text-gray-500 mb-2">
-              Comparing within <code className="font-mono">{scopeLabel}</code> — inferred from your menu's URLs.
+          {/* Scope override — the menu is diffed only against this branch of the
+              site index. Always shows what was autodetected so the user can see
+              the inferred scope even after overriding it. */}
+          <div className="mb-2">
+            <label className="flex items-center gap-2 text-[11px] text-gray-600">
+              <span className="shrink-0">Compare within</span>
+              <select
+                value={manualScope === null ? '__auto__' : manualScope}
+                onChange={e => onSetScope(e.target.value === '__auto__' ? null : e.target.value)}
+                className="flex-1 min-w-0 text-[11px] border border-gray-300 rounded px-1.5 py-0.5 font-mono bg-white"
+              >
+                <option value="__auto__">Auto-detected: {formatScopeLabel(autoScope)}</option>
+                <option value="">Whole site index</option>
+                {scopeCandidates.map(c => (
+                  <option key={c} value={c}>{formatScopeLabel(c)}</option>
+                ))}
+              </select>
+            </label>
+            <p className="text-[11px] text-gray-400 mt-1">
+              Auto-detected: <code className="font-mono">{formatScopeLabel(autoScope)}</code>
+              {manualScope !== null && (
+                <> · overridden → comparing within <code className="font-mono">{scopeLabel}</code></>
+              )}
             </p>
-          )}
+          </div>
           <div className="mb-2 text-xs text-gray-600">
             {diffCounts.total === 0 ? (
               <span className="text-green-700 font-medium">✓ No differences — menu matches the site index.</span>
@@ -1964,11 +2151,9 @@ function ComparePanel({
               <span>
                 <span className="font-medium">{diffCounts.total} change{diffCounts.total === 1 ? '' : 's'}:</span>{' '}
                 {diffCounts.added > 0 && <span className="text-green-700">{diffCounts.added} added</span>}
-                {diffCounts.added > 0 && (diffCounts.removed + diffCounts.renamed + diffCounts.moved > 0) && ' · '}
+                {diffCounts.added > 0 && (diffCounts.removed + diffCounts.moved > 0) && ' · '}
                 {diffCounts.removed > 0 && <span className="text-red-700">{diffCounts.removed} removed</span>}
-                {diffCounts.removed > 0 && (diffCounts.renamed + diffCounts.moved > 0) && ' · '}
-                {diffCounts.renamed > 0 && <span className="text-amber-700">{diffCounts.renamed} renamed</span>}
-                {diffCounts.renamed > 0 && diffCounts.moved > 0 && ' · '}
+                {diffCounts.removed > 0 && diffCounts.moved > 0 && ' · '}
                 {diffCounts.moved > 0 && <span className="text-blue-700">{diffCounts.moved} moved</span>}
               </span>
             )}
@@ -1978,6 +2163,15 @@ function ComparePanel({
               </span>
             )}
           </div>
+          {renamedCount > 0 && (
+            <RenamePanel
+              entries={renameEntries}
+              onAccept={onAccept}
+              onReject={onReject}
+              onAcceptAll={onAcceptAllRenames}
+              onKeepAll={onKeepAllRenames}
+            />
+          )}
           <div className="border border-gray-200 rounded-lg max-h-[640px] overflow-auto p-2">
             <SiteIndexTree
               nodes={scopedSiteForest ?? siteIndexForest}
