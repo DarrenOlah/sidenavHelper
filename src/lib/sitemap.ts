@@ -472,6 +472,25 @@ export function addSiblingAfter(roots: SitemapNode[], siblingId: string, node: S
   })
 }
 
+// Insert `node` immediately before the sibling identified by `siblingId`,
+// regardless of where in the tree that sibling lives. Mirror of
+// addSiblingAfter; used by the compare flow's forward-search placement.
+export function addSiblingBefore(roots: SitemapNode[], siblingId: string, node: SitemapNode): SitemapNode[] {
+  const topIdx = roots.findIndex(n => n.id === siblingId)
+  if (topIdx !== -1) {
+    const next = roots.slice()
+    next.splice(topIdx, 0, node)
+    return next.map(n => ({ ...n, children: n.children.slice() }))
+  }
+  return mapTree(roots, n => {
+    const idx = n.children.findIndex(c => c.id === siblingId)
+    if (idx === -1) return n
+    const children = n.children.slice()
+    children.splice(idx, 0, node)
+    return { ...n, children }
+  })
+}
+
 // Remove a node (and its subtree) by id. The App restricts this to user-added
 // rows so a misclick can't lose pasted structure.
 export function removeNode(roots: SitemapNode[], id: string): SitemapNode[] {

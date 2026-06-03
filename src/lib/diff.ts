@@ -17,6 +17,8 @@
 import {
   type SitemapNode,
   addChild,
+  addSiblingAfter,
+  addSiblingBefore,
   findNode,
   removeNode,
   renameNode,
@@ -121,6 +123,12 @@ export type DiffEntry =
       suggestedMenuParentId: string | null
       // Display-only label of the suggested parent (or '' for top of menu).
       suggestedMenuParentLabel: string
+      // Normalized hrefs of the site-side parent's children, in order (empty-href
+      // categories map to ''). Used at apply time to position the inserted page
+      // relative to siblings that already exist in the menu.
+      siteSiblingHrefs: string[]
+      // The added node's own index within siteSiblingHrefs.
+      siteSiblingIndex: number
     }
   | {
       kind: 'removed'
@@ -355,6 +363,9 @@ export function diffForests(
     const suggested = siteParentHref
       ? findMenuNodeByHref(menuForest, siteParentHref)
       : null
+    // Site-side siblings (top-level added nodes use the site roots), in order,
+    // so apply can position the page relative to siblings already in the menu.
+    const siteSiblings = s.parent ? s.parent.children : siteForest
     entries.push({
       kind: 'added',
       id: `add:${normalizeHrefForMatch(s.node.href)}`,
@@ -362,6 +373,8 @@ export function diffForests(
       siteParentPath: s.urlPath,
       suggestedMenuParentId: suggested ? suggested.id : null,
       suggestedMenuParentLabel: suggested ? suggested.label : '',
+      siteSiblingHrefs: siteSiblings.map(c => normalizeHrefForMatch(c.href)),
+      siteSiblingIndex: siteSiblings.indexOf(s.node),
     })
   }
 
@@ -385,11 +398,32 @@ export function diffForests(
 export function applyDiff(menuForest: SitemapNode[], entry: DiffEntry): SitemapNode[] {
   switch (entry.kind) {
     case 'added': {
-      const targetParent = entry.suggestedMenuParentId
+      const suggested = entry.suggestedMenuParentId
       // If the suggested parent was removed in the meantime, fall back to top.
-      const targetExists = targetParent === null || findNode(menuForest, targetParent) !== null
+      const parentNode =
+        suggested === null ? null : findNode(menuForest, suggested)
+      const targetParentId = parentNode ? parentNode.id : null
       const cloned = cloneWithFreshIds(entry.siteNode)
-      return addChild(menuForest, targetExists ? targetParent : null, cloned)
+
+      // Position the page relative to its site-order siblings: insert after the
+      // nearest preceding sibling already in the menu, else before the nearest
+      // following one, else append (parent has no comparable children yet).
+      const children = parentNode ? parentNode.children : menuForest
+      const childIdByHref = new Map<string, string>()
+      for (const c of children) {
+        const h = normalizeHrefForMatch(c.href)
+        if (h && !childIdByHref.has(h)) childIdByHref.set(h, c.id)
+      }
+      const { siteSiblingHrefs, siteSiblingIndex } = entry
+      for (let i = siteSiblingIndex - 1; i >= 0; i--) {
+        const id = childIdByHref.get(siteSiblingHrefs[i])
+        if (id) return addSiblingAfter(menuForest, id, cloned)
+      }
+      for (let i = siteSiblingIndex + 1; i < siteSiblingHrefs.length; i++) {
+        const id = childIdByHref.get(siteSiblingHrefs[i])
+        if (id) return addSiblingBefore(menuForest, id, cloned)
+      }
+      return addChild(menuForest, targetParentId, cloned)
     }
     case 'removed': {
       if (!findNode(menuForest, entry.menuNode.id)) return menuForest

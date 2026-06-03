@@ -249,6 +249,90 @@ describe('applyDiff', () => {
     expect(after[0].label).toBe('A1')
   })
 
+  it('added inserts between existing siblings per site order, not at the end', () => {
+    // Menu parent A has children A1, A3. Site adds A2 between them.
+    const menu = [n('a', '/a', 'A', [n('a1', '/a/1', 'A1'), n('a3', '/a/3', 'A3')])]
+    const site = [
+      n('sa', '/a', 'A', [
+        n('sa1', '/a/1', 'A1'),
+        n('sa2', '/a/2', 'A2'),
+        n('sa3', '/a/3', 'A3'),
+      ]),
+    ]
+    const r = diffForests(menu, site)
+    const addEntry = r.entries.find(e => e.kind === 'added')!
+    const after = applyDiff(menu, addEntry)
+    expect(findNode(after, 'a')!.children.map(c => c.label)).toEqual(['A1', 'A2', 'A3'])
+  })
+
+  it('added inserts before the first sibling when it sorts first', () => {
+    // Menu parent A has A2. Site adds A1 before it (forward-search path).
+    const menu = [n('a', '/a', 'A', [n('a2', '/a/2', 'A2')])]
+    const site = [
+      n('sa', '/a', 'A', [n('sa1', '/a/1', 'A1'), n('sa2', '/a/2', 'A2')]),
+    ]
+    const r = diffForests(menu, site)
+    const addEntry = r.entries.find(e => e.kind === 'added')!
+    const after = applyDiff(menu, addEntry)
+    expect(findNode(after, 'a')!.children.map(c => c.label)).toEqual(['A1', 'A2'])
+  })
+
+  it('added appends after the last sibling when it sorts last', () => {
+    const menu = [n('a', '/a', 'A', [n('a1', '/a/1', 'A1')])]
+    const site = [
+      n('sa', '/a', 'A', [n('sa1', '/a/1', 'A1'), n('sa2', '/a/2', 'A2')]),
+    ]
+    const r = diffForests(menu, site)
+    const addEntry = r.entries.find(e => e.kind === 'added')!
+    const after = applyDiff(menu, addEntry)
+    expect(findNode(after, 'a')!.children.map(c => c.label)).toEqual(['A1', 'A2'])
+  })
+
+  it('added appends as a fallback when no site sibling exists in the menu yet', () => {
+    // Menu parent A has an unrelated child X not present in the site siblings.
+    const menu = [n('a', '/a', 'A', [n('ax', '/a/x', 'AX')])]
+    const site = [
+      n('sa', '/a', 'A', [n('sa1', '/a/1', 'A1'), n('sa2', '/a/2', 'A2')]),
+    ]
+    const r = diffForests(menu, site)
+    // Take the first added entry (A1) — none of its site siblings are in the menu.
+    const addEntry = r.entries.find(e => e.kind === 'added')!
+    const after = applyDiff(menu, addEntry)
+    expect(findNode(after, 'a')!.children.map(c => c.label)).toEqual(['AX', 'A1'])
+  })
+
+  it('added positions a top-level page among root siblings', () => {
+    const menu = [n('a', '/a', 'A'), n('c', '/c', 'C')]
+    const site = [n('sa', '/a', 'A'), n('sb', '/b', 'B'), n('sc', '/c', 'C')]
+    const r = diffForests(menu, site)
+    const addEntry = r.entries.find(e => e.kind === 'added')!
+    const after = applyDiff(menu, addEntry)
+    expect(after.map(c => c.label)).toEqual(['A', 'B', 'C'])
+  })
+
+  it('sequential accepts converge to site order regardless of accept order', () => {
+    // Site adds A2 and A3 between A1 and A4. Accept A3 first, then A2.
+    const menu = [n('a', '/a', 'A', [n('a1', '/a/1', 'A1'), n('a4', '/a/4', 'A4')])]
+    const site = [
+      n('sa', '/a', 'A', [
+        n('sa1', '/a/1', 'A1'),
+        n('sa2', '/a/2', 'A2'),
+        n('sa3', '/a/3', 'A3'),
+        n('sa4', '/a/4', 'A4'),
+      ]),
+    ]
+    // Accept A3 first (recompute diff against the original menu).
+    const r1 = diffForests(menu, site)
+    const add3 = r1.entries.find(e => e.kind === 'added' && e.siteNode.label === 'A3')!
+    const afterA3 = applyDiff(menu, add3)
+    expect(findNode(afterA3, 'a')!.children.map(c => c.label)).toEqual(['A1', 'A3', 'A4'])
+    // Recompute diff against the updated menu, then accept A2.
+    const r2 = diffForests(afterA3, site)
+    const add2 = r2.entries.find(e => e.kind === 'added' && e.siteNode.label === 'A2')!
+    const afterA2 = applyDiff(afterA3, add2)
+    expect(findNode(afterA2, 'a')!.children.map(c => c.label)).toEqual(['A1', 'A2', 'A3', 'A4'])
+  })
+
   it('moved preserves the node\'s current children and re-parents it', () => {
     // Menu: A > Page(with custom child); B
     // Site: A; B > Page

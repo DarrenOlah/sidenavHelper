@@ -11,6 +11,7 @@ import {
   addChild,
   addFirstChild,
   addSiblingAfter,
+  addSiblingBefore,
   removeNode,
   setHref,
   setExternal,
@@ -240,6 +241,27 @@ describe('addSiblingAfter', () => {
     const forest = buildSampleForest()
     const original = JSON.stringify(forest)
     addSiblingAfter(forest, 'a1', leaf('new', 'New'))
+    expect(JSON.stringify(forest)).toBe(original)
+  })
+})
+
+describe('addSiblingBefore', () => {
+  it('inserts before a top-level sibling', () => {
+    const forest = buildSampleForest()
+    const next = addSiblingBefore(forest, 'b', leaf('new', 'New'))
+    expect(next.map(n => n.id)).toEqual(['a', 'new', 'b', 'c'])
+  })
+
+  it('inserts before a nested sibling', () => {
+    const forest = buildSampleForest()
+    const next = addSiblingBefore(forest, 'a2', leaf('new', 'New'))
+    expect(findNode(next, 'a')?.children.map(c => c.id)).toEqual(['a1', 'new', 'a2'])
+  })
+
+  it('does not mutate the input forest', () => {
+    const forest = buildSampleForest()
+    const original = JSON.stringify(forest)
+    addSiblingBefore(forest, 'a1', leaf('new', 'New'))
     expect(JSON.stringify(forest)).toBe(original)
   })
 })
