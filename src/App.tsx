@@ -39,6 +39,17 @@ import sidenavCss from './vendor/au-sidenav/sidenav.css?raw'
 import './vendor/au-sidenav/sidenav.js'
 import sidenavJs from './vendor/au-sidenav/sidenav.js?raw'
 
+// Font Awesome 6 Free's Solid webfont, used by the live preview's
+// `.external::after` rule to render the exact glyph the host site shows. The
+// host's `.external::after` uses content \f08e under a "Font Awesome 5 Free"
+// family, but its actual webfont is shimmed up to FA6 — and in FA6, \f08e was
+// renamed external-link → `arrow-up-right-from-square` (free solid) with a
+// redesigned, modern drawing. FA4's \f08e and FA5 Free (which lacks \f08e
+// entirely) both render a different/empty glyph, so FA6 is the only match. We
+// import just the woff2 (and define our own @font-face below) rather than FA's
+// full CSS. Helper-app only — never part of the copied output.
+import faSolidWoff2 from '@fortawesome/fontawesome-free/webfonts/fa-solid-900.woff2'
+
 declare global {
   interface Window {
     AuSidenav?: {
@@ -1274,7 +1285,7 @@ function SiteUrlField({
       </Combobox.Root>
       {draftInvalid && (
         <p className="mt-1 text-[11px] text-red-600">
-          Site URL is required. Must be a full URL ending with <code>/</code> (e.g. <code>https://www.example.edu/</code>).
+          Site URL is required. Use a full URL ending with <code>/</code> (e.g. <code>https://www.example.edu/</code>), or just <code>/</code> for a menu built from root-relative links.
         </p>
       )}
       {detectedSiteUrl && draft !== detectedSiteUrl && (
@@ -1799,6 +1810,35 @@ function SortableEditableRow({
 // so it can't leak onto the helper's own UI. Updating textContent on each
 // color change is how the live preview reflects the chosen accent without
 // re-rendering the nav itself (so initNav state survives).
+// Preview-only imitation of the host site's external-link affordance. The real
+// site stylesheet appends an nbsp + Font Awesome's external-link glyph after any
+// `.external` element:
+//
+//   .external:after{content:"\00a0\f08e";font-family:var(--textIcon);font-weight:900}
+//
+// (\f08e is FA's `external-link`; \00a0 is a leading non-breaking space.)
+//
+// We deliberately do NOT add this to the vendored sidenav.css, because that CSS
+// is shipped verbatim in the copied output — emitting our own `.external::after`
+// there would double the icon (or conflict) once it lands on the real page that
+// already defines the rule. Instead we inject it only into the live-preview
+// <style>, using the bundled Font Awesome 6 Free Solid face (see the import near
+// the top) in place of the site's `--textIcon` variable, which only exists on
+// the real page. This mirrors the host rule exactly — same \f08e codepoint,
+// same weight 900 (solid) — and because the host's font is FA6-shimmed, FA6's
+// \f08e (`arrow-up-right-from-square`) is the glyph it actually draws, so the
+// preview icon matches production. Scoped under .au-sidenav so it can't bleed
+// onto the helper's own chrome.
+const PREVIEW_EXTERNAL_CSS = `
+@font-face {
+  font-family: "Font Awesome 6 Free";
+  font-style: normal;
+  font-weight: 900;
+  font-display: block;
+  src: url(${JSON.stringify(faSolidWoff2)}) format("woff2");
+}
+.au-sidenav .external::after { content: "\\00a0\\f08e"; font-family: "Font Awesome 6 Free"; font-weight: 900; }`
+
 function applyPreviewSidenavCss(color: string) {
   if (typeof document === 'undefined') return
   let style = document.head.querySelector<HTMLStyleElement>('style[data-au-sidenav-preview]')
@@ -1807,7 +1847,7 @@ function applyPreviewSidenavCss(color: string) {
     style.setAttribute('data-au-sidenav-preview', '')
     document.head.appendChild(style)
   }
-  style.textContent = applyAccentColor(sidenavCss, color)
+  style.textContent = applyAccentColor(sidenavCss, color) + '\n' + PREVIEW_EXTERNAL_CSS
 }
 
 interface SidenavPreviewProps {

@@ -89,6 +89,19 @@
   color: #000;
 }
 
+/* External links carry a host-page `.external` class so the site skin can
+ * append its outbound-link icon via `.external::after`. Some skins also set
+ * `display`/`padding` on the base `.external` rule, which would collapse the
+ * row's vertical rhythm (an inline display drops the block padding). Re-assert
+ * our box model at higher specificity than a bare `.external` so the external
+ * row matches every other link. Keep these values in sync with the rule above. */
+.au-sidenav .au-sidenav__list a.external {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.5rem 2.5rem 0.5rem calc(var(--depth, 0) * 1rem);
+}
+
 /* Plain-text grouping rows are italicized to distinguish them from real
  * links at a glance. Parents (those with a sublist) are clickable to expand
  * via sidenav.js, so the cursor reflects that; leaf plain-text rows stay

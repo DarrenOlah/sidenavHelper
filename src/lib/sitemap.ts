@@ -510,21 +510,29 @@ export function setExternal(roots: SitemapNode[], id: string, external: boolean)
   return mapTree(roots, n => n.id === id ? { ...n, external } : n)
 }
 
-// Find every distinct origin in the forest, ranked by frequency descending.
-// Each entry is `origin + '/'` (e.g. 'https://www.army.edu/'). Ties broken by
-// first-encountered in tree order. Returns [] if nothing parseable.
+// Find every distinct site URL in the forest, ranked by frequency descending.
+// Absolute hrefs contribute their `origin + '/'` (e.g. 'https://www.army.edu/').
+// Root-relative / relative hrefs ('/about/', 'about/') contribute '/', the
+// root-relative site URL — they live on whatever host serves the page, so a
+// menu built entirely from relative links detects '/' as its dominant site URL
+// instead of latching onto a stray absolute off-site link (the bug where every
+// row then gets marked external). Ties broken by first-encountered tree order.
+// Returns [] if the forest has no usable hrefs.
 export function detectSiteUrls(roots: SitemapNode[]): string[] {
   const counts = new Map<string, number>()
   const order: string[] = []
+  function bump(key: string): void {
+    if (!counts.has(key)) order.push(key)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
   function walk(nodes: SitemapNode[]): void {
     for (const n of nodes) {
       if (n.href) {
         try {
-          const origin = new URL(n.href).origin
-          if (!counts.has(origin)) order.push(origin)
-          counts.set(origin, (counts.get(origin) ?? 0) + 1)
+          bump(new URL(n.href).origin + '/')
         } catch {
-          // not an absolute URL — ignore
+          // Not an absolute URL — a site-relative path. Bucket under '/'.
+          bump('/')
         }
       }
       walk(n.children)
@@ -536,7 +544,6 @@ export function detectSiteUrls(roots: SitemapNode[]): string[] {
   return order
     .slice()
     .sort((a, b) => (counts.get(b) ?? 0) - (counts.get(a) ?? 0))
-    .map(o => o + '/')
 }
 
 // Convenience wrapper: the single most common origin (with trailing /) or ''.
@@ -551,9 +558,14 @@ export function detectSiteUrl(roots: SitemapNode[]): string {
 // partial-host bug: 'https://www.army' is a prefix of both
 // 'https://www.army.edu/' and 'https://www.armywarcollege.edu/'; requiring a
 // trailing slash means a typo matches nothing instead of silently mis-classifying.
+//
+// '/' is also valid: it's the root-relative site URL for a menu whose links are
+// all site-relative paths ('/about/'). applySiteUrl then treats every href
+// starting with '/' as internal and only absolute (cross-host) links as external.
 export function isValidSiteUrl(value: string): boolean {
   if (value === '') return false
   if (!value.endsWith('/')) return false
+  if (value === '/') return true
   try {
     new URL(value)
     return true
@@ -666,9 +678,10 @@ function renderItem(
   // (going to '#') so the user can see the row exists and is broken.
   const isPlainText = node.href.trim() === ''
   // External links open in a new tab. rel="noopener noreferrer" prevents the
-  // opened page from accessing window.opener or leaking the referrer.
+  // opened page from accessing window.opener or leaking the referrer. The
+  // "external" class lets the menu style them distinctly (e.g. an outbound icon).
   const anchorAttrs = node.external
-    ? ` target="_blank" rel="noopener noreferrer"`
+    ? ` class="external" target="_blank" rel="noopener noreferrer"`
     : ''
   const linkHtml = isPlainText
     ? `<span class="au-sidenav__text">${label}</span>`

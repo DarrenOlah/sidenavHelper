@@ -444,12 +444,24 @@ describe('detectSiteUrl', () => {
     expect(detectSiteUrl(forest)).toBe('https://www.army.edu/')
   })
 
-  it('returns empty string when no node has a parseable absolute href', () => {
+  it("detects '/' when links are root-relative (no parseable absolute href)", () => {
     const forest = [
       nodeWithHref('1', '/relative/path'),
       nodeWithHref('2', ''),
     ]
-    expect(detectSiteUrl(forest)).toBe('')
+    expect(detectSiteUrl(forest)).toBe('/')
+  })
+
+  it("ranks '/' first when relative links outnumber a stray absolute one", () => {
+    // Reproduces the report: a menu of root-relative links plus one off-site
+    // absolute link. '/' must win so applySiteUrl doesn't mark everything external.
+    const forest = [
+      nodeWithHref('1', '/about/'),
+      nodeWithHref('2', '/contact/'),
+      nodeWithHref('3', '/news/'),
+      nodeWithHref('4', 'https://other.example.com/foo'),
+    ]
+    expect(detectSiteUrl(forest)).toBe('/')
   })
 
   it('returns empty string for an empty forest', () => {
@@ -502,9 +514,22 @@ describe('detectSiteUrls', () => {
     ])
   })
 
-  it('returns [] when no node has a parseable absolute href', () => {
-    expect(detectSiteUrls([nodeWithHref('1', '/relative')])).toEqual([])
+  it("buckets root-relative hrefs under '/'", () => {
+    expect(detectSiteUrls([nodeWithHref('1', '/relative')])).toEqual(['/'])
+  })
+
+  it('returns [] for an empty forest', () => {
     expect(detectSiteUrls([])).toEqual([])
+  })
+
+  it("ranks '/' among absolute origins by frequency", () => {
+    const forest = [
+      nodeWithHref('1', '/a'),
+      nodeWithHref('2', '/b'),
+      nodeWithHref('3', 'https://other.example.com/x'),
+      nodeWithHref('4', '/c'),
+    ]
+    expect(detectSiteUrls(forest)).toEqual(['/', 'https://other.example.com/'])
   })
 
   it('every result ends with a trailing slash', () => {
@@ -545,6 +570,10 @@ describe('isValidSiteUrl', () => {
 
   it('rejects a relative path (URL constructor needs a base)', () => {
     expect(isValidSiteUrl('/relative/')).toBe(false)
+  })
+
+  it("accepts '/' as the root-relative site URL", () => {
+    expect(isValidSiteUrl('/')).toBe(true)
   })
 })
 
@@ -606,5 +635,17 @@ describe('applySiteUrl', () => {
     const original = JSON.stringify(forest)
     applySiteUrl(forest, 'https://www.army.edu/')
     expect(JSON.stringify(forest)).toBe(original)
+  })
+
+  it("with siteUrl '/', root-relative links are internal and absolute links external", () => {
+    const forest = [
+      nodeWithHref('1', '/about/'),
+      nodeWithHref('2', '/contact/'),
+      nodeWithHref('3', 'https://other.example.com/x'),
+    ]
+    const result = applySiteUrl(forest, '/')
+    expect(findNode(result, '1')?.external).toBe(false)
+    expect(findNode(result, '2')?.external).toBe(false)
+    expect(findNode(result, '3')?.external).toBe(true)
   })
 })
