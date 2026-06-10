@@ -868,3 +868,57 @@ describe('detectSiblingModeRoot', () => {
     expect(r.entries).toEqual([]) // no diff entries at all
   })
 })
+
+describe('cross-convention compare (relative menu vs absolute site index)', () => {
+  it('matches shared pages across conventions, surfacing only the genuinely new one', () => {
+    // Menu uses root-relative hrefs; site index uses absolute URLs for the same
+    // pages. normalizeHrefForMatch strips host on both sides, so /about ↔
+    // https://host/about match; only /programs/y is genuinely new.
+    const menu = [
+      n('a', '/about', 'About'),
+      n('p', '/programs', 'Programs', [n('px', '/programs/x', 'X')]),
+    ]
+    const site = [
+      n('sa', 'https://armyuniversity.army.afpims.mil/about', 'About'),
+      n('sp', 'https://armyuniversity.army.afpims.mil/programs', 'Programs', [
+        n('spx', 'https://armyuniversity.army.afpims.mil/programs/x', 'X'),
+        n('spy', 'https://armyuniversity.army.afpims.mil/programs/y', 'Y'),
+      ]),
+    ]
+    const r = diffForests(menu, site)
+    const added = r.entries.filter(e => e.kind === 'added')
+    expect(added).toHaveLength(1)
+    const e = added[0]
+    if (e.kind !== 'added') throw new Error('bad')
+    expect(e.siteNode.label).toBe('Y')
+  })
+
+  it('preserves external: true (and the absolute href) when adding an external link', () => {
+    const menu = [n('a', '/a', 'A')]
+    const site = [
+      n('sa', '/a', 'A', [
+        { ...n('sext', 'https://other.example.com/x', 'Ext'), external: true },
+      ]),
+    ]
+    const r = diffForests(menu, site)
+    const addEntry = r.entries.find(e => e.kind === 'added')!
+    const after = applyDiff(menu, addEntry)
+    const inserted = findNode(after, 'a')!.children[0]
+    expect(inserted.external).toBe(true)
+    expect(inserted.href).toBe('https://other.example.com/x')
+  })
+
+  it('preserves external: false when adding an internal link', () => {
+    const menu = [n('a', '/a', 'A')]
+    const site = [
+      n('sa', '/a', 'A', [
+        { ...n('sint', '/a/1', 'Int'), external: false },
+      ]),
+    ]
+    const r = diffForests(menu, site)
+    const addEntry = r.entries.find(e => e.kind === 'added')!
+    const after = applyDiff(menu, addEntry)
+    const inserted = findNode(after, 'a')!.children[0]
+    expect(inserted.external).toBe(false)
+  })
+})

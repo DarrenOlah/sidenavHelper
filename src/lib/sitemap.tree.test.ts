@@ -18,6 +18,7 @@ import {
   detectSiteUrl,
   detectSiteUrls,
   applySiteUrl,
+  rebaseInternalHrefs,
   isValidSiteUrl,
   makeNode,
   type SitemapNode,
@@ -647,5 +648,78 @@ describe('applySiteUrl', () => {
     expect(findNode(result, '1')?.external).toBe(false)
     expect(findNode(result, '2')?.external).toBe(false)
     expect(findNode(result, '3')?.external).toBe(true)
+  })
+
+  // Documents WHY rebaseInternalHrefs exists: an absolute internal href, once
+  // pulled into a root-relative menu, would be flipped to external by a later
+  // applySiteUrl(forest, '/') because it doesn't start with '/'.
+  it("with siteUrl '/', an absolute internal href is wrongly flipped to external", () => {
+    const forest = [
+      { ...nodeWithHref('1', 'https://www.army.edu/about/'), external: false },
+    ]
+    const result = applySiteUrl(forest, '/')
+    expect(findNode(result, '1')?.external).toBe(true)
+  })
+})
+
+describe('rebaseInternalHrefs', () => {
+  it("rewrites absolute internal hrefs to root-relative when menu root is '/'", () => {
+    const forest = [
+      { ...nodeWithHref('1', 'https://www.army.edu/about/?q=1#sec'), external: false },
+    ]
+    const result = rebaseInternalHrefs(forest, '/')
+    expect(findNode(result, '1')?.href).toBe('/about/?q=1#sec')
+  })
+
+  it('leaves external (cross-host) links absolute', () => {
+    const forest = [
+      { ...nodeWithHref('1', 'https://other.example.com/x'), external: true },
+    ]
+    const result = rebaseInternalHrefs(forest, '/')
+    expect(findNode(result, '1')?.href).toBe('https://other.example.com/x')
+  })
+
+  it('leaves already-relative hrefs untouched', () => {
+    const forest = [{ ...nodeWithHref('1', '/about/'), external: false }]
+    const result = rebaseInternalHrefs(forest, '/')
+    expect(findNode(result, '1')?.href).toBe('/about/')
+  })
+
+  it('leaves empty-href rows alone', () => {
+    const forest = [{ ...nodeWithHref('1', ''), external: false }]
+    const result = rebaseInternalHrefs(forest, '/')
+    expect(findNode(result, '1')?.href).toBe('')
+  })
+
+  it('recurses into children', () => {
+    const forest = [
+      { ...nodeWithHref('1', 'https://www.army.edu/a', [
+        { ...nodeWithHref('1a', 'https://www.army.edu/a/b'), external: false },
+        { ...nodeWithHref('1b', 'https://other.example.com/y'), external: true },
+      ]), external: false },
+    ]
+    const result = rebaseInternalHrefs(forest, '/')
+    expect(findNode(result, '1')?.href).toBe('/a')
+    expect(findNode(result, '1a')?.href).toBe('/a/b')
+    expect(findNode(result, '1b')?.href).toBe('https://other.example.com/y')
+  })
+
+  it('is a no-op when the menu root is not /', () => {
+    const forest = [
+      { ...nodeWithHref('1', 'https://www.army.edu/about/'), external: false },
+    ]
+    const result = rebaseInternalHrefs(forest, 'https://www.army.edu/')
+    expect(findNode(result, '1')?.href).toBe('https://www.army.edu/about/')
+  })
+
+  // After rebasing, a later applySiteUrl(forest, '/') keeps the page internal —
+  // this is the regression the rebasing prevents.
+  it("rebased internal hrefs survive a later applySiteUrl(forest, '/')", () => {
+    const forest = [
+      { ...nodeWithHref('1', 'https://www.army.edu/about/'), external: false },
+    ]
+    const rebased = rebaseInternalHrefs(forest, '/')
+    const reclassified = applySiteUrl(rebased, '/')
+    expect(findNode(reclassified, '1')?.external).toBe(false)
   })
 })

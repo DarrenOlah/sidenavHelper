@@ -584,6 +584,34 @@ export function applySiteUrl(roots: SitemapNode[], siteUrl: string): SitemapNode
   })
 }
 
+// Rewrite absolute INTERNAL hrefs in a subtree to root-relative form
+// (pathname + search + hash — the same strip transformHref applies for
+// 'site-root-relative' output), leaving external (cross-host) links absolute.
+//
+// Used when inserting a page from an absolute-URL site index into a menu whose
+// own root is '/'. Without this, the inserted node keeps its absolute href; a
+// later applySiteUrl(forest, '/') over the whole menu would then see a host
+// that doesn't start with '/' and wrongly flip the page to external. Rebasing
+// makes the inserted node match the menu's convention so it stays internal.
+//
+// Only acts when `menuSiteUrl === '/'` (a root-relative menu) — when the menu
+// itself uses absolute URLs there's nothing to rebase. External nodes and
+// empty-href rows are left untouched.
+export function rebaseInternalHrefs(roots: SitemapNode[], menuSiteUrl: string): SitemapNode[] {
+  if (menuSiteUrl !== '/') return roots
+  return mapTree(roots, n => {
+    if (n.external) return n
+    if (n.href.trim() === '') return n
+    try {
+      const u = new URL(n.href)
+      return { ...n, href: (u.pathname || '/') + u.search + u.hash }
+    } catch {
+      // Already relative (or unparseable) — leave as-is.
+      return n
+    }
+  })
+}
+
 // ── Output ──────────────────────────────────────────────────────────────────
 
 export type RootMode = 'parent' | 'parent-expanded' | 'hide' | 'sibling'

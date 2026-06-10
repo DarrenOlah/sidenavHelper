@@ -77,6 +77,7 @@ import {
   setExternal,
   detectSiteUrls,
   applySiteUrl,
+  rebaseInternalHrefs,
   isValidSiteUrl,
   ensureIdsPast,
   type SitemapNode,
@@ -145,6 +146,15 @@ interface State {
   // Parsed second paste. null when no site index is loaded.
   siteIndexForest: SitemapNode[] | null
   siteIndexParseError: string
+  // Origin that defines internal-ness for the SITE INDEX forest. Separate from
+  // `siteUrl` because the site index can use a different URL convention
+  // (absolute) than the menu (root-relative); no single root is a prefix of
+  // both. Drives applySiteUrl on siteIndexForest. '' when no index is loaded.
+  siteIndexUrl: string
+  // Read-only snapshot of the most-common detected origin in the site index.
+  detectedSiteIndexUrl: string
+  // All distinct origins from the site index paste, ranked by frequency desc.
+  detectedSiteIndexUrls: string[]
   // Diff entry ids the user explicitly dismissed. Accepted entries don't need
   // tracking because applyDiff mutates the menu forest and they fall out of
   // the next diff naturally.
@@ -177,6 +187,9 @@ const INITIAL_STATE: State = {
   siteIndexHtml: '',
   siteIndexForest: null,
   siteIndexParseError: '',
+  siteIndexUrl: '',
+  detectedSiteIndexUrl: '',
+  detectedSiteIndexUrls: [],
   rejectedDiffIds: new Set(),
   manualScope: null,
 }
@@ -270,7 +283,7 @@ export default function App() {
   const pasteRef = useRef<HTMLDivElement | null>(null)
   const sitePasteRef = useRef<HTMLDivElement | null>(null)
 
-  const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, accentColor, pageCount, maxDepth, parseError, previewCurrentPath, addedIds, siteUrl, detectedSiteUrl, detectedSiteUrls, isMenuPaste, siteIndexForest, siteIndexParseError, rejectedDiffIds, manualScope } = state
+  const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, accentColor, pageCount, maxDepth, parseError, previewCurrentPath, addedIds, siteUrl, detectedSiteUrl, detectedSiteUrls, isMenuPaste, siteIndexForest, siteIndexParseError, siteIndexUrl, detectedSiteIndexUrl, detectedSiteIndexUrls, rejectedDiffIds, manualScope } = state
 
   const hasForest = forest.length > 0
   const hasPickedRoot = rootId !== null && findNode(forest, rootId) !== null
@@ -329,6 +342,9 @@ export default function App() {
         siteIndexHtml: '',
         siteIndexForest: null,
         siteIndexParseError: '',
+        siteIndexUrl: '',
+        detectedSiteIndexUrl: '',
+        detectedSiteIndexUrls: [],
         rejectedDiffIds: new Set(),
         manualScope: null,
       }))
@@ -381,6 +397,9 @@ export default function App() {
       siteIndexHtml: '',
       siteIndexForest: null,
       siteIndexParseError: '',
+      siteIndexUrl: '',
+      detectedSiteIndexUrl: '',
+      detectedSiteIndexUrls: [],
       rejectedDiffIds: new Set(),
       manualScope: null,
     }))
@@ -404,20 +423,34 @@ export default function App() {
         siteIndexHtml: source,
         siteIndexForest: null,
         siteIndexParseError: 'No links or list items found in the site index paste.',
+        siteIndexUrl: '',
+        detectedSiteIndexUrl: '',
+        detectedSiteIndexUrls: [],
       }))
       return false
     }
+    // Classify the site index against its OWN detected root, independent of the
+    // menu's siteUrl. The two forests can use different URL conventions (the
+    // menu root-relative, the index absolute), so each needs its own root to
+    // mark external links correctly — without this, externals added from the
+    // index would lose their `external` flag (see ComparePanel's accept flow).
+    const detectedList = detectSiteUrls(result.forest)
+    const detected = detectedList[0] ?? ''
+    const classified = applySiteUrl(result.forest, detected)
     // parseSitemapHtml reset the id counter to 0 and ran up to N. The menu
     // forest already has ids in the 'n*' range from an earlier parse — advance
     // the counter past the union so any later makeNode() call (e.g. "+ Add
     // page") produces ids that don't collide with existing menu nodes.
     setState(s => {
-      ensureIdsPast(s.forest, result.forest)
+      ensureIdsPast(s.forest, classified)
       return {
         ...s,
         siteIndexHtml: source,
-        siteIndexForest: result.forest,
+        siteIndexForest: classified,
         siteIndexParseError: '',
+        siteIndexUrl: detected,
+        detectedSiteIndexUrl: detected,
+        detectedSiteIndexUrls: detectedList,
         // A fresh site index supersedes any previously-rejected entries —
         // they were keyed against the previous diff and may not match anymore.
         rejectedDiffIds: new Set(),
@@ -454,6 +487,9 @@ export default function App() {
       siteIndexHtml: '',
       siteIndexForest: null,
       siteIndexParseError: '',
+      siteIndexUrl: '',
+      detectedSiteIndexUrl: '',
+      detectedSiteIndexUrls: [],
       rejectedDiffIds: new Set(),
       manualScope: null,
     }))
@@ -465,12 +501,19 @@ export default function App() {
 
   const handleAcceptDiff = (entry: DiffEntry) => {
     setState(s => {
-      const nextForest = applyDiff(s.forest, entry)
+      let nextForest = applyDiff(s.forest, entry)
+      if (entry.kind !== 'added') return { ...s, forest: nextForest }
+      // Rebase the inserted page (and its subtree) into the menu's URL
+      // convention: an internal page pulled from an absolute-URL site index
+      // keeps its absolute href otherwise, and a later menu Site URL change
+      // would flip it to external. rebaseInternalHrefs is a no-op when the menu
+      // root isn't '/' and for already-relative or external nodes; it preserves
+      // ids, so findRecentlyAddedId still locates the insert.
+      nextForest = rebaseInternalHrefs(nextForest, s.siteUrl)
       // For an inserted page, also flag it as user-added so the URL editor
       // pops open and the delete button shows — matching the existing
       // "+ Add page" UX. The inserted node is the last child of the suggested
       // parent (or last top-level when no parent).
-      if (entry.kind !== 'added') return { ...s, forest: nextForest }
       const insertedId = findRecentlyAddedId(s.forest, nextForest)
       if (!insertedId) return { ...s, forest: nextForest }
       const nextAdded = new Set(s.addedIds)
@@ -658,6 +701,28 @@ export default function App() {
       ...s,
       siteUrl: s.detectedSiteUrl,
       forest: applySiteUrl(s.forest, s.detectedSiteUrl),
+    }))
+  }
+
+  // Same as the menu's Site URL handlers, but for the site-index root — keeps
+  // siteIndexForest classified so future "added" accepts carry the right
+  // `external` flag. The site index uses its own root because it may follow a
+  // different URL convention (absolute) than the menu (root-relative).
+  const handleSiteIndexUrlCommit = (value: string) => {
+    setState(s => ({
+      ...s,
+      siteIndexUrl: value,
+      siteIndexForest: s.siteIndexForest ? applySiteUrl(s.siteIndexForest, value) : s.siteIndexForest,
+    }))
+  }
+
+  const handleRevertSiteIndexUrl = () => {
+    setState(s => ({
+      ...s,
+      siteIndexUrl: s.detectedSiteIndexUrl,
+      siteIndexForest: s.siteIndexForest
+        ? applySiteUrl(s.siteIndexForest, s.detectedSiteIndexUrl)
+        : s.siteIndexForest,
     }))
   }
 
@@ -1026,6 +1091,11 @@ export default function App() {
                 manualScope={manualScope}
                 scopeCandidates={scopeCandidates}
                 onSetScope={handleSetScope}
+                siteIndexUrl={siteIndexUrl}
+                detectedSiteIndexUrl={detectedSiteIndexUrl}
+                detectedSiteIndexUrls={detectedSiteIndexUrls}
+                onCommitSiteIndexUrl={handleSiteIndexUrlCommit}
+                onRevertSiteIndexUrl={handleRevertSiteIndexUrl}
                 visibleEntries={visibleEntries}
                 renameEntries={renameEntries}
                 renamedCount={renamedCount}
@@ -1176,6 +1246,9 @@ interface SiteUrlFieldProps {
   hasForest: boolean
   onCommit: (value: string) => void
   onRevert: () => void
+  // Field label. Defaults to "Site URL" (the menu's root); the compare panel
+  // reuses this component for the site index with label="Site index URL".
+  label?: string
 }
 
 function SiteUrlField({
@@ -1185,6 +1258,7 @@ function SiteUrlField({
   hasForest,
   onCommit,
   onRevert,
+  label = 'Site URL',
 }: SiteUrlFieldProps) {
   const [draft, setDraft] = useState(appliedSiteUrl)
   const { contains } = Combobox.useFilter({ sensitivity: 'base' })
@@ -1236,7 +1310,7 @@ function SiteUrlField({
 
   return (
     <fieldset className="mt-3">
-      <legend className="text-xs font-medium text-gray-700 mb-1">Site URL</legend>
+      <legend className="text-xs font-medium text-gray-700 mb-1">{label}</legend>
       <Combobox.Root
         items={detectedSiteUrls}
         inputValue={draft}
@@ -2101,6 +2175,11 @@ function ComparePanel({
   manualScope,
   scopeCandidates,
   onSetScope,
+  siteIndexUrl,
+  detectedSiteIndexUrl,
+  detectedSiteIndexUrls,
+  onCommitSiteIndexUrl,
+  onRevertSiteIndexUrl,
   visibleEntries,
   renameEntries,
   renamedCount,
@@ -2119,6 +2198,11 @@ function ComparePanel({
   manualScope: string | null
   scopeCandidates: string[]
   onSetScope: (scope: string | null) => void
+  siteIndexUrl: string
+  detectedSiteIndexUrl: string
+  detectedSiteIndexUrls: string[]
+  onCommitSiteIndexUrl: (value: string) => void
+  onRevertSiteIndexUrl: () => void
   visibleEntries: DiffEntry[]
   renameEntries: DiffEntry[]
   renamedCount: number
@@ -2159,6 +2243,21 @@ function ComparePanel({
 
       {siteIndexForest && (
         <>
+          {/* The site index's own root. Separate from the menu's Site URL
+              because the index may use absolute URLs while the menu is
+              root-relative; this is what marks the index's external links so
+              they stay external when added to the menu. */}
+          <div className="mb-2">
+            <SiteUrlField
+              label="Site index URL"
+              appliedSiteUrl={siteIndexUrl}
+              detectedSiteUrl={detectedSiteIndexUrl}
+              detectedSiteUrls={detectedSiteIndexUrls}
+              hasForest={siteIndexForest !== null}
+              onCommit={onCommitSiteIndexUrl}
+              onRevert={onRevertSiteIndexUrl}
+            />
+          </div>
           {/* Scope override — the menu is diffed only against this branch of the
               site index. Always shows what was autodetected so the user can see
               the inferred scope even after overriding it. */}
