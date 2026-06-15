@@ -3,14 +3,17 @@
 const FALLBACK_HELPER_URL = 'https://darrenolah.github.io/sidenavHelper/'
 const FALLBACK_REPO_URL = 'https://github.com/DarrenOlah/sidenavHelper'
 const FALLBACK_HERO_BASE = 'https://darrenolah.github.io/heroHelper/'
+const FALLBACK_COMPONENT_BASE = 'https://darrenolah.github.io/componentHelper/'
 
-// Sister app on the same GitHub account is assumed to keep this repo name.
+// Sister apps on the same GitHub account are assumed to keep these repo names.
 const HERO_REPO_NAME = 'heroHelper'
+const COMPONENT_REPO_NAME = 'componentHelper'
 
 interface DerivedUrls {
   helperUrl: string
   repoUrl: string
   heroBase: string
+  componentBase: string
 }
 
 function deriveUrls(): DerivedUrls {
@@ -19,6 +22,7 @@ function deriveUrls(): DerivedUrls {
       helperUrl: FALLBACK_HELPER_URL,
       repoUrl: FALLBACK_REPO_URL,
       heroBase: FALLBACK_HERO_BASE,
+      componentBase: FALLBACK_COMPONENT_BASE,
     }
   }
 
@@ -32,6 +36,7 @@ function deriveUrls(): DerivedUrls {
         helperUrl: `${origin}/${repo}/`,
         repoUrl: `https://github.com/${user}/${repo}`,
         heroBase: `${origin}/${HERO_REPO_NAME}/`,
+        componentBase: `${origin}/${COMPONENT_REPO_NAME}/`,
       }
     }
   }
@@ -40,6 +45,7 @@ function deriveUrls(): DerivedUrls {
     helperUrl: FALLBACK_HELPER_URL,
     repoUrl: FALLBACK_REPO_URL,
     heroBase: FALLBACK_HERO_BASE,
+    componentBase: FALLBACK_COMPONENT_BASE,
   }
 }
 
@@ -48,3 +54,5 @@ export const HELPER_URL = urls.helperUrl
 export const REPO_URL = urls.repoUrl
 export const HERO_IMAGE_URL = `${urls.heroBase}#/image`
 export const HERO_VIDEO_URL = `${urls.heroBase}#/video`
+export const COMPONENT_DRAWER_URL = `${urls.componentBase}#/drawer`
+export const COMPONENT_CARDS_URL = `${urls.componentBase}#/cards`

@@ -1,6 +1,6 @@
 import { useState, useMemo, useRef, useEffect, type ClipboardEvent as RClipboardEvent } from 'react'
 
-import { HELPER_URL, REPO_URL, HERO_IMAGE_URL, HERO_VIDEO_URL } from './lib/config'
+import { HELPER_URL, REPO_URL, HERO_IMAGE_URL, HERO_VIDEO_URL, COMPONENT_DRAWER_URL, COMPONENT_CARDS_URL } from './lib/config'
 
 type NavItem =
   | { kind: 'current'; id: string; label: string }
@@ -9,7 +9,9 @@ type NavItem =
 const NAV_ITEMS: NavItem[] = [
   { kind: 'external', id: 'image', label: 'Hero Image', href: HERO_IMAGE_URL },
   { kind: 'external', id: 'video', label: 'Hero Video', href: HERO_VIDEO_URL },
-  { kind: 'current', id: 'sidenav', label: 'SideNav' },
+  { kind: 'current', id: 'sidenav', label: 'Sidenav' },
+  { kind: 'external', id: 'drawer', label: 'Drawer', href: COMPONENT_DRAWER_URL },
+  { kind: 'external', id: 'cards', label: 'Cards', href: COMPONENT_CARDS_URL },
 ]
 
 import {
