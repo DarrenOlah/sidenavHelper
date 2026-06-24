@@ -43,13 +43,15 @@ import sidenavJs from './vendor/au-sidenav/sidenav.js?raw'
 
 // Font Awesome 6 Free's Solid webfont, used by the live preview's
 // `.external::after` rule to render the exact glyph the host site shows. The
-// host's `.external::after` uses content \f08e under a "Font Awesome 5 Free"
-// family, but its actual webfont is shimmed up to FA6 — and in FA6, \f08e was
-// renamed external-link → `arrow-up-right-from-square` (free solid) with a
-// redesigned, modern drawing. FA4's \f08e and FA5 Free (which lacks \f08e
-// entirely) both render a different/empty glyph, so FA6 is the only match. We
-// import just the woff2 (and define our own @font-face below) rather than FA's
-// full CSS. Helper-app only — never part of the copied output.
+// host (army.edu, a DNN/AFPIMS site) loads Font Awesome 6 — its `<head>` pulls
+// `font-awesome6/css/all.min.css` plus FA's `v4-shims.min.css`, which maps
+// legacy FA4 class names and codepoints onto FA6 glyphs. So the host's `\f08e`
+// (FA4's `external-link`) resolves to FA6's redesigned `arrow-up-right-from-
+// square` (free solid, weight 900). Only the FA6 webfont draws that glyph at
+// \f08e, so it's the face we import here. We pull just the woff2 (and define our
+// own @font-face below) rather than FA's full CSS. The dependency is pinned
+// (exact, no caret) to 6.4.2 to match the version the live site currently ships.
+// Helper-app only — never part of the copied output.
 import faSolidWoff2 from '@fortawesome/fontawesome-free/webfonts/fa-solid-900.woff2'
 
 declare global {
@@ -1901,10 +1903,10 @@ function SortableEditableRow({
 // <style>, using the bundled Font Awesome 6 Free Solid face (see the import near
 // the top) in place of the site's `--textIcon` variable, which only exists on
 // the real page. This mirrors the host rule exactly — same \f08e codepoint,
-// same weight 900 (solid) — and because the host's font is FA6-shimmed, FA6's
-// \f08e (`arrow-up-right-from-square`) is the glyph it actually draws, so the
-// preview icon matches production. Scoped under .au-sidenav so it can't bleed
-// onto the helper's own chrome.
+// same weight 900 (solid) — and because the host loads FA6 (with v4-shims),
+// FA6's \f08e (`arrow-up-right-from-square`) is the glyph it actually draws, so
+// the preview icon matches production. Scoped under .au-sidenav so it can't
+// bleed onto the helper's own chrome.
 const PREVIEW_EXTERNAL_CSS = `
 @font-face {
   font-family: "Font Awesome 6 Free";
