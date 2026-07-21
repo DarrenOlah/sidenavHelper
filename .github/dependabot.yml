@@ -6,3 +6,6 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+    ignore:
+      # Pinned to 6.4.2 to match the live site — see commit 5a370d8.
+      - dependency-name: "@fortawesome/fontawesome-free"
