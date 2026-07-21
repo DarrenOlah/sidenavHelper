@@ -4,6 +4,13 @@ updates:
     directory: "/" # Location of package manifests
     schedule:
       interval: "weekly"
+    groups:
+      # Bundle low-risk minor + patch bumps into a single PR. Major bumps are
+      # left out so they still arrive as individual, reviewable PRs.
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
     cooldown:
       default-days: 7
     ignore:
