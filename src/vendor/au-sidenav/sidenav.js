@@ -49,12 +49,27 @@
   function findCurrentLink(nav) {
     var here = normalizePath(getCurrentPath(nav));
     var links = nav.querySelectorAll("." + CLS.list + " a[href]");
+    // An exact match always wins. Failing that, fall back to the nearest
+    // ancestor: the link whose path is the longest prefix of the current one.
+    // This lets off-menu descendants (e.g. a dynamically generated News
+    // article under /News/) highlight their parent section instead of leaving
+    // the visitor with nothing marked.
+    var bestPrefix = null;
+    var bestLen = 0;
     for (var i = 0; i < links.length; i++) {
-      if (normalizePath(links[i].getAttribute("href")) === here) {
-        return links[i];
+      var p = normalizePath(links[i].getAttribute("href"));
+      if (p === here) return links[i];
+      // normalizePath forces a trailing "/", so the prefix test is
+      // path-boundary safe: "/news/" is not a prefix of "/newsroom/".
+      // p.length > 1 excludes the site root "/", which prefixes everything.
+      if (p.length > 1 && here.length > p.length && here.slice(0, p.length) === p) {
+        if (p.length > bestLen) {
+          bestLen = p.length;
+          bestPrefix = links[i];
+        }
       }
     }
-    return null;
+    return bestPrefix;
   }
 
   function setExpanded(li, expanded) {
