@@ -92,3 +92,64 @@ describe('sidenav findCurrentLink', () => {
     expect(currentHref(nav)).toBeNull()
   })
 })
+
+// Why findDuplicateLinks (src/lib/duplicates.ts) exists. These assert the
+// broken behavior on purpose: it is a property of the vendored component, not
+// something the helper can fix, so the helper must refuse to emit menus that
+// trigger it.
+describe('sidenav findCurrentLink — duplicate links (first occurrence wins)', () => {
+  // The same page linked twice: once as a shortcut inside Carlisle Experience,
+  // once as the real Distance Education branch. Mirrors the site index that
+  // motivated the duplicate validator.
+  function duplicateMenu(): SitemapNode[] {
+    return [
+      parent('carlisle', 'Carlisle Experience', '/usawc/carlisle-experience/', [
+        leaf('shortcut', 'DDE', '/usawc/dde/'),
+      ]),
+      parent('dde', 'Department of Distance Education (DDE)', '/usawc/dde/', [
+        leaf('techsupport', 'Tech Support', '/usawc/dde/tech-support/'),
+      ]),
+    ]
+  }
+
+  it('selects the FIRST link in document order, leaving the second unreachable', () => {
+    const nav = buildNav(duplicateMenu(), '/usawc/dde/')
+    const matches = nav.querySelectorAll('a.au-sidenav__link--current')
+    expect(matches).toHaveLength(1)
+    // Both anchors have href="/usawc/dde/", so identify the winner by its
+    // position rather than its href.
+    const all = Array.from(nav.querySelectorAll('a[href="/usawc/dde/"]'))
+    expect(all).toHaveLength(2)
+    expect(matches[0]).toBe(all[0])
+  })
+
+  it('marks and expands the WRONG section when the duplicate comes first', () => {
+    const nav = buildNav(duplicateMenu(), '/usawc/dde/')
+    const carlisleLi = nav
+      .querySelector('a[href="/usawc/carlisle-experience/"]')!
+      .closest('.au-sidenav__item')!
+    // The shortcut's ancestor lights up...
+    expect(carlisleLi.classList.contains('au-sidenav__item--current-section')).toBe(true)
+    expect(carlisleLi.classList.contains('au-sidenav__item--expanded')).toBe(true)
+    // ...while the real DDE branch stays collapsed and unmarked.
+    const realDdeLi = nav
+      .querySelector('a[href="/usawc/dde/tech-support/"]')!
+      .closest('.au-sidenav__sublist')!
+      .closest('.au-sidenav__item')!
+    expect(realDdeLi.classList.contains('au-sidenav__item--current-section')).toBe(false)
+    expect(realDdeLi.classList.contains('au-sidenav__item--expanded')).toBe(false)
+  })
+
+  it('resolves an absolute external href against pathname only (host discarded)', () => {
+    // Why external-only collisions on '/' are noise but internal/external
+    // collisions on a real path are not: the host never enters the comparison.
+    // external: true keeps the absolute href in the output; without it
+    // generateSidenavHtml would strip the host and the point would be moot.
+    const press: SitemapNode = {
+      ...leaf('press', 'Parameters Journal', 'https://press.armywarcollege.edu/parameters/'),
+      external: true,
+    }
+    const nav = buildNav([press, leaf('internal', 'Parameters', '/parameters/')], '/parameters/')
+    expect(currentHref(nav)).toBe('https://press.armywarcollege.edu/parameters/')
+  })
+})

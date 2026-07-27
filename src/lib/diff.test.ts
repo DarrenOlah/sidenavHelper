@@ -152,17 +152,85 @@ describe('diffForests — label fallback', () => {
 })
 
 describe('diffForests — edge cases', () => {
-  it('handles duplicate URLs by pairing in DFS order', () => {
+  it('pairs duplicate menu URLs with the structurally closest site node', () => {
     const menu = [n('a', '/x', 'A1'), n('b', '/x', 'B1')]
     const site = [n('sa', '/x', 'A1')]
     const r = diffForests(menu, site)
     expect(r.matched).toHaveLength(1)
+    // 'a' wins on the label tiebreak, not on document order.
     expect(r.matched[0].menuNode.id).toBe('a')
-    // Second menu /x has no site counterpart → removed
     const removed = r.entries.filter(e => e.kind === 'removed')
     expect(removed).toHaveLength(1)
     if (removed[0].kind !== 'removed') throw new Error('bad')
     expect(removed[0].menuNode.id).toBe('b')
+  })
+
+  it('matches the real branch, not an earlier shortcut link (DDE regression)', () => {
+    // The index links /usawc/dde/ twice: a childless shortcut nested under
+    // Carlisle Experience (first in document order) and the real branch at top
+    // level. Pairing by document order matched the shortcut, which produced a
+    // bogus move of the menu's DDE into Carlisle plus a bogus add of the real
+    // branch — and accepting that move deleted the subtree.
+    const menu = [
+      n('m-carlisle', '/usawc/carlisle/', 'Carlisle Experience'),
+      n('m-dde', '/usawc/dde/', 'Department of Distance Education (DDE)', [
+        n('m-dde-1', '/usawc/dde/tech-support/', 'Tech Support'),
+      ]),
+    ]
+    const site = [
+      n('s-carlisle', '/usawc/carlisle/', 'Carlisle Experience', [
+        n('s-shortcut', '/usawc/dde/', 'DDE'),
+      ]),
+      n('s-dde', '/usawc/dde/', 'DDE', [
+        n('s-dde-1', '/usawc/dde/tech-support/', 'Tech Support'),
+      ]),
+    ]
+    const r = diffForests(menu, site)
+    const ddePair = r.matched.find(p => p.menuNode.id === 'm-dde')
+    expect(ddePair?.siteNode.id).toBe('s-dde')
+    // The shortcut is recognised as a duplicate link, not a new page.
+    expect(r.siteShortcutNodes.map(x => x.id)).toEqual(['s-shortcut'])
+    expect(r.entries.filter(e => e.kind === 'added')).toHaveLength(0)
+    expect(r.entries.filter(e => e.kind === 'moved')).toHaveLength(0)
+  })
+
+  it('never proposes adding a page whose href the menu already has', () => {
+    const menu = [n('m', '/dupe/', 'Page')]
+    const site = [n('s1', '/dupe/', 'Page'), n('s2', '/dupe/', 'Page shortcut')]
+    const r = diffForests(menu, site)
+    expect(r.entries.filter(e => e.kind === 'added')).toHaveLength(0)
+    expect(r.siteShortcutNodes).toHaveLength(1)
+  })
+
+  it('marks a move unresolvable when the site parent is a menu-only category', () => {
+    // Carlisle Experience is href-less in the menu but a real page in the
+    // index, so the move target cannot be located. This must NOT read as
+    // "move to the top level".
+    const menu = [cat('c', 'Carlisle Experience', [n('m', '/carlisle/kid/', 'Kid')])]
+    const site = [n('s', '/carlisle/', 'Carlisle Experience', [n('sk', '/carlisle/kid/', 'Kid')])]
+    const r = diffForests(menu, site)
+    const moved = r.entries.find(e => e.kind === 'moved')
+    if (moved?.kind !== 'moved') throw new Error('expected a moved entry')
+    expect(moved.toMenuParentId).toBeNull()
+    expect(moved.toMenuParentResolved).toBe(false)
+  })
+
+  it('marks an add unresolvable when its site parent has no menu counterpart', () => {
+    const menu = [n('m', '/a/', 'A')]
+    const site = [
+      n('sa', '/a/', 'A'),
+      n('sb', '/b/', 'B', [n('sc', '/b/c/', 'C')]),
+    ]
+    const r = diffForests(menu, site)
+    const added = r.entries.filter(e => e.kind === 'added')
+    const b = added.find(e => e.kind === 'added' && e.siteNode.id === 'sb')
+    const c = added.find(e => e.kind === 'added' && e.siteNode.id === 'sc')
+    if (b?.kind !== 'added' || c?.kind !== 'added') throw new Error('bad')
+    // B is genuinely top-level, so null IS the right target.
+    expect(b.suggestedMenuParentResolved).toBe(true)
+    // C's parent B does not exist in the menu yet.
+    expect(c.suggestedMenuParentId).toBeNull()
+    expect(c.suggestedMenuParentResolved).toBe(false)
   })
 
   it('case-insensitive URL matching', () => {
@@ -350,6 +418,23 @@ describe('applyDiff', () => {
     const movedPage = findNode(after, 'p')!
     expect(movedPage.children.map(c => c.id)).toEqual(['px'])
     expect(findNode(after, 'b')!.children.map(c => c.id)).toEqual(['p'])
+  })
+
+  it('refuses to move a node into its own subtree instead of deleting it', () => {
+    // removeNode would take the target down with the node, then addChild would
+    // find no parent and drop the branch entirely — this returned [] before.
+    const menu = [n('a', '/a', 'A', [n('b', '/a/b', 'B')])]
+    const entry: DiffEntry = {
+      kind: 'moved',
+      id: 'move:a',
+      menuNode: menu[0],
+      fromMenuParentId: null,
+      toMenuParentId: 'b',
+      toMenuParentResolved: true,
+      siteParentPath: ['/a/b'],
+      toMenuParentLabel: 'B',
+    }
+    expect(applyDiff(menu, entry)).toEqual(menu)
   })
 
   it('is a no-op when the entry target no longer exists', () => {

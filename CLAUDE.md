@@ -24,6 +24,53 @@ SitemapNode[]                      ←── editable in App via rename/toggle/r
    ↓ inline preview (dangerouslySetInnerHTML + window.AuSidenav.initNav)
 ```
 
+### Merge pipeline (site index → existing menu)
+
+When a previously-generated menu is pasted and then a fresh site index is pasted on top, the app opens a **staged review** instead of editing anything:
+
+```
+diffForests()      raw entries: added / removed / renamed / moved        lib/diff.ts
+   ↓
+buildMergePlan()   MergeChange[] grouped into phases, with dependsOn     lib/plan.ts
+   ↓
+applyPlan()        one transactional forest rewrite, on Apply only       lib/plan.ts
+   ↓
+<ReviewMode/>      full-screen: plan list + stepper + staged result      ReviewMode.tsx
+```
+
+The merge policy: **the site index is authoritative for structure and URLs; the existing menu is authoritative for page names and for logical groupings that have no counterpart in the site hierarchy.**
+
+`diff.ts` answers "what is textually different". It cannot answer "what happened", and consolidating the two is the point of `plan.ts`. A single editorial event — an href-less group page becoming a real page — produces one add plus a move for *every* descendant in the raw diff. On the checked-in example that is 38 entries for one decision.
+
+`buildMergePlan` folds those into three phases, which fall out of a real dependency graph (you cannot place a page inside a container before deciding what that container is):
+
+| phase | means | change kinds |
+|---|---|---|
+| `identity` | what a node **is** | `promote`, `demote`, `url-rename` |
+| `structure` | where nodes **live** | `add-subtree`, `move`, `remove` |
+| `labels` | cosmetic | `relabel` |
+
+Consolidation rules, in order: promote a menu-only group whose internal pages all sit under a new site page (suppressing the descendant "moves" that were only describing the missing level); pair a same-parent leftover remove + add into one `url-rename`; fold descendant adds into their ancestor; ignore site-index shortcut links; suppress the tool's own sibling-mode `" Home"` suffix.
+
+Defaults that encode the policy: renames keep **your** label, removals are **never** staged automatically, adds and promotions are staged.
+
+Two invariants in `applyPlan`, each enforced per change with the change refused rather than half-applied:
+
+- **No orphans.** Every insert resolves a concrete parent id; nothing is ever appended to the forest top level. With a picked root the forest is `[rootNode]` and `App` renders `selectSubtree(forest, rootId)`, so a node appended beside the root is invisible in the editor *and* absent from the copied HTML. Blocked changes report a reason instead of guessing.
+- **No duplicate links.** See below.
+
+### Duplicate links break "you are here"
+
+`sidenav.js`'s `findCurrentLink` returns on the **first** anchor whose path matches the visitor's, then walks up marking `--current-section` and expanding that branch. So the same page linked from two places leaves the second copy permanently unreachable *and* expands the wrong section — with nothing visibly wrong in the markup.
+
+`lib/duplicates.ts` guards this. `normalizeMenuPath` **must** stay a mirror of `normalizePath` in `sidenav.js`: path only (`new URL(href, origin).pathname` — the host is discarded), lowercased, trailing slash forced. Neither `normalizeHref` (host-aware) nor `normalizeHrefForMatch` (keeps `?search`) produces the same buckets.
+
+- `error` — two or more **internal** links share a path.
+- `warning` — an internal and an external link share a path.
+- **Not reported** — external-only groups. Off-site links commonly point at a host root, so several normalize to `/`; that is expected and flagging it is noise.
+
+Surfaced as a standing banner over the Edit Menu (not just during a merge — duplicates can be introduced by hand), as a per-row marker, and as a hard block in `applyPlan`. `sidenav.test.ts` pins the first-wins behavior as a deliberate regression test: it is a property of the vendored component, so the helper's job is to refuse to emit menus that trigger it.
+
 ### Vendored au-sidenav
 
 `src/vendor/au-sidenav/sidenav.css` and `src/vendor/au-sidenav/sidenav.js` are vendored copies of the **au-sidenav** component. They are imported at build time:

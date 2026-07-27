@@ -77,7 +77,7 @@ export function normalizeHref(href: string): string {
 // cross-host collisions would have to come from user-added external links
 // (which are excluded from scope detection via the `external` flag) or
 // genuine duplicates the user is already aware of.
-function normalizeHrefForMatch(href: string): string {
+export function normalizeHrefForMatch(href: string): string {
   if (!href) return ''
   const s = href.trim()
   if (!s) return ''
@@ -119,8 +119,15 @@ export type DiffEntry =
       siteParentPath: UrlPath
       // The menu-side parent id where the page should be inserted on accept.
       // Derived by URL-matching the site-side direct URL-bearing parent against
-      // the menu. null = top of menu (user can drag into place after).
+      // the menu. null means EITHER "genuinely top-level" OR "the site-side
+      // parent has no counterpart in the menu" — read suggestedMenuParentResolved
+      // to tell them apart before inserting anything.
       suggestedMenuParentId: string | null
+      // False when the site index puts this page under a parent that does not
+      // exist in the menu. Conflating that with "top of menu" is how pages used
+      // to get appended as extra forest roots and then silently dropped by
+      // selectSubtree — see the no-orphan invariant in plan.ts.
+      suggestedMenuParentResolved: boolean
       // Display-only label of the suggested parent (or '' for top of menu).
       suggestedMenuParentLabel: string
       // Normalized hrefs of the site-side parent's children, in order (empty-href
@@ -146,7 +153,13 @@ export type DiffEntry =
       id: string
       menuNode: SitemapNode
       fromMenuParentId: string | null
+      // null means EITHER "genuinely top-level" OR "unresolvable" — see
+      // toMenuParentResolved.
       toMenuParentId: string | null
+      // False when the site-side parent has no counterpart in the menu (most
+      // often because it is an href-less logical category on the menu side).
+      // Such a move cannot be applied and must be reported, not guessed at.
+      toMenuParentResolved: boolean
       siteParentPath: UrlPath
       // Display-only label of the new parent (or '' for top of menu).
       toMenuParentLabel: string
@@ -158,6 +171,12 @@ export interface DiffResult {
   // Menu nodes with empty href — surfaced so tests/UI can assert they were
   // correctly ignored by matching. Categories are never reported as removed.
   unmatchedMenuCategories: SitemapNode[]
+  // Site nodes whose href was already claimed by a better structural match —
+  // i.e. the index links the same page from two places (a shortcut/cross-link).
+  // They produce NO 'added' entry: adding them would put the same href in the
+  // menu twice, which breaks au-sidenav's current-page detection (see
+  // duplicates.ts). Surfaced for tests and for UI reporting.
+  siteShortcutNodes: SitemapNode[]
 }
 
 // ── Internals ───────────────────────────────────────────────────────────────
@@ -189,6 +208,59 @@ function pathsEqual(a: UrlPath, b: UrlPath): boolean {
   if (a.length !== b.length) return false
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
   return true
+}
+
+// How good a pairing two same-href nodes make. Only consulted when one side of
+// an href bucket has more than one candidate — i.e. a page is linked from more
+// than one place. Pairing those by document order (the old behavior) picks
+// arbitrarily: a real site index will list a section's canonical branch AND a
+// shortcut to it from a sibling section, and matching the menu's real branch
+// against the shortcut produces a bogus move plus a bogus add of the branch.
+//
+// Higher is better. Position dominates because it is the strongest evidence
+// that two nodes are "the same place in the tree"; label and shape break ties.
+function pairAffinity(m: Indexed, s: Indexed): number {
+  let score = 0
+  if (pathsEqual(m.urlPath, s.urlPath)) score += 8
+  else if (
+    m.urlPath.length > 0 &&
+    s.urlPath.length > 0 &&
+    m.urlPath[m.urlPath.length - 1] === s.urlPath[s.urlPath.length - 1]
+  ) score += 4
+  if (m.node.label.trim().toLowerCase() === s.node.label.trim().toLowerCase()) score += 2
+  const mHasKids = m.node.children.length > 0
+  const sHasKids = s.node.children.length > 0
+  if (mHasKids === sHasKids) score += 1
+  if (m.node.children.length === s.node.children.length) score += 1
+  return score
+}
+
+// Pair up one href bucket. Single-candidate buckets (the overwhelming majority)
+// short-circuit to the obvious pairing. Otherwise score every combination and
+// take them best-first, which is deterministic and adequate at these sizes —
+// a bucket with more than a handful of candidates would mean the same page is
+// linked from a handful of places, which is already a content problem.
+function pairBucket(menuList: Indexed[], siteList: Indexed[]): Array<[Indexed, Indexed]> {
+  if (menuList.length === 1 && siteList.length === 1) return [[menuList[0], siteList[0]]]
+  const candidates: Array<{ m: number; s: number; score: number }> = []
+  for (let i = 0; i < menuList.length; i++) {
+    for (let j = 0; j < siteList.length; j++) {
+      candidates.push({ m: i, s: j, score: pairAffinity(menuList[i], siteList[j]) })
+    }
+  }
+  // Descending score; ties fall back to document order on each side so the
+  // result is stable regardless of Map iteration details.
+  candidates.sort((a, b) => b.score - a.score || a.m - b.m || a.s - b.s)
+  const usedMenu = new Set<number>()
+  const usedSite = new Set<number>()
+  const pairs: Array<[Indexed, Indexed]> = []
+  for (const c of candidates) {
+    if (usedMenu.has(c.m) || usedSite.has(c.s)) continue
+    usedMenu.add(c.m)
+    usedSite.add(c.s)
+    pairs.push([menuList[c.m], siteList[c.s]])
+  }
+  return pairs
 }
 
 // Find the menu node whose normalized href matches `targetHref`. The caller
@@ -263,12 +335,16 @@ export function diffForests(
   const menuMatched = new Set<string>()
   const siteMatched = new Set<string>()
 
+  // Site nodes left over in an href bucket that DID produce a match: the index
+  // links the same page from two places. Suppressed everywhere downstream so we
+  // never propose adding a duplicate href to the menu.
+  const siteShortcutNodes: SitemapNode[] = []
+
   for (const [href, menuList] of menuByHref) {
     const siteList = siteByHref.get(href) ?? []
-    const n = Math.min(menuList.length, siteList.length)
-    for (let i = 0; i < n; i++) {
-      const m = menuList[i]
-      const s = siteList[i]
+    if (siteList.length === 0) continue
+    const pairs = pairBucket(menuList, siteList)
+    for (const [m, s] of pairs) {
       matched.push({
         menuNode: m.node,
         menuPath: m.urlPath,
@@ -279,7 +355,11 @@ export function diffForests(
       menuMatched.add(m.node.id)
       siteMatched.add(s.node.id)
     }
+    for (const s of siteList) {
+      if (!siteMatched.has(s.node.id)) siteShortcutNodes.push(s.node)
+    }
   }
+  const siteShortcutIds = new Set(siteShortcutNodes.map(node => node.id))
 
   // Label fallback: among nodes still unmatched, build label indexes (trim +
   // lowercase). Only unique-on-both-sides pairs match — ambiguity is left
@@ -297,6 +377,9 @@ export function diffForests(
   const siteLabelIdx = new Map<string, Indexed[]>()
   for (const s of siteIdx) {
     if (siteMatched.has(s.node.id)) continue
+    // A shortcut copy must not sneak back in via its label and steal a match
+    // from an unrelated menu node.
+    if (siteShortcutIds.has(s.node.id)) continue
     if (s.node.href.trim() === '') continue
     const k = s.node.label.trim().toLowerCase()
     if (!k) continue
@@ -350,6 +433,10 @@ export function diffForests(
       menuNode: pair.menuNode,
       fromMenuParentId: fromParent ? fromParent.id : null,
       toMenuParentId: targetParent ? targetParent.id : null,
+      // Resolved when the site says "top level" (no parent href to find) or
+      // when we actually located the parent. Unresolved means the target exists
+      // in the site index but has no menu counterpart.
+      toMenuParentResolved: siteParentHref === '' || targetParent !== null,
       siteParentPath: pair.sitePath,
       toMenuParentLabel: targetParent ? targetParent.label : '',
     })
@@ -359,6 +446,9 @@ export function diffForests(
   for (const s of siteIdx) {
     if (siteMatched.has(s.node.id)) continue
     if (s.node.href.trim() === '') continue // skip categories on site side too
+    // A second link to a page the menu already has is not a new page. Adding it
+    // would duplicate the href and break current-page detection.
+    if (siteShortcutIds.has(s.node.id)) continue
     const siteParentHref = s.urlPath[s.urlPath.length - 1] ?? ''
     const suggested = siteParentHref
       ? findMenuNodeByHref(menuForest, siteParentHref)
@@ -372,6 +462,7 @@ export function diffForests(
       siteNode: s.node,
       siteParentPath: s.urlPath,
       suggestedMenuParentId: suggested ? suggested.id : null,
+      suggestedMenuParentResolved: siteParentHref === '' || suggested !== null,
       suggestedMenuParentLabel: suggested ? suggested.label : '',
       siteSiblingHrefs: siteSiblings.map(c => normalizeHrefForMatch(c.href)),
       siteSiblingIndex: siteSiblings.indexOf(s.node),
@@ -389,7 +480,46 @@ export function diffForests(
     })
   }
 
-  return { entries, matched, unmatchedMenuCategories }
+  return { entries, matched, unmatchedMenuCategories, siteShortcutNodes }
+}
+
+// Insert `node` under `parentId` at the position the site index implies:
+// after the nearest preceding site sibling that already exists in the menu,
+// else before the nearest following one, else appended (the parent has no
+// comparable children yet). `parentId === null` targets the forest top level.
+//
+// Shared by applyDiff and plan.ts's applyPlan so both place pages identically.
+// Callers are responsible for having resolved `parentId` — this function does
+// not guess, and plan.ts's no-orphan invariant depends on that.
+export function insertAtSitePosition(
+  forest: SitemapNode[],
+  parentId: string | null,
+  node: SitemapNode,
+  siteSiblingHrefs: string[],
+  siteSiblingIndex: number,
+): SitemapNode[] {
+  const parentNode = parentId === null ? null : findNode(forest, parentId)
+  const children = parentNode ? parentNode.children : forest
+  const childIdByHref = new Map<string, string>()
+  for (const c of children) {
+    const h = normalizeHrefForMatch(c.href)
+    if (h && !childIdByHref.has(h)) childIdByHref.set(h, c.id)
+  }
+  for (let i = siteSiblingIndex - 1; i >= 0; i--) {
+    const id = childIdByHref.get(siteSiblingHrefs[i])
+    if (id) return addSiblingAfter(forest, id, node)
+  }
+  for (let i = siteSiblingIndex + 1; i < siteSiblingHrefs.length; i++) {
+    const id = childIdByHref.get(siteSiblingHrefs[i])
+    if (id) return addSiblingBefore(forest, id, node)
+  }
+  return addChild(forest, parentNode ? parentNode.id : null, node)
+}
+
+// Clone a site subtree with fresh ids. Exported for plan.ts, which inserts
+// pages pulled from the site index the same way applyDiff does.
+export function cloneSiteSubtree(node: SitemapNode): SitemapNode {
+  return cloneWithFreshIds(node)
 }
 
 // Apply an entry to the menu forest. Returns the new forest (immutable).
@@ -402,28 +532,14 @@ export function applyDiff(menuForest: SitemapNode[], entry: DiffEntry): SitemapN
       // If the suggested parent was removed in the meantime, fall back to top.
       const parentNode =
         suggested === null ? null : findNode(menuForest, suggested)
-      const targetParentId = parentNode ? parentNode.id : null
       const cloned = cloneWithFreshIds(entry.siteNode)
-
-      // Position the page relative to its site-order siblings: insert after the
-      // nearest preceding sibling already in the menu, else before the nearest
-      // following one, else append (parent has no comparable children yet).
-      const children = parentNode ? parentNode.children : menuForest
-      const childIdByHref = new Map<string, string>()
-      for (const c of children) {
-        const h = normalizeHrefForMatch(c.href)
-        if (h && !childIdByHref.has(h)) childIdByHref.set(h, c.id)
-      }
-      const { siteSiblingHrefs, siteSiblingIndex } = entry
-      for (let i = siteSiblingIndex - 1; i >= 0; i--) {
-        const id = childIdByHref.get(siteSiblingHrefs[i])
-        if (id) return addSiblingAfter(menuForest, id, cloned)
-      }
-      for (let i = siteSiblingIndex + 1; i < siteSiblingHrefs.length; i++) {
-        const id = childIdByHref.get(siteSiblingHrefs[i])
-        if (id) return addSiblingBefore(menuForest, id, cloned)
-      }
-      return addChild(menuForest, targetParentId, cloned)
+      return insertAtSitePosition(
+        menuForest,
+        parentNode ? parentNode.id : null,
+        cloned,
+        entry.siteSiblingHrefs,
+        entry.siteSiblingIndex,
+      )
     }
     case 'removed': {
       if (!findNode(menuForest, entry.menuNode.id)) return menuForest
@@ -436,6 +552,12 @@ export function applyDiff(menuForest: SitemapNode[], entry: DiffEntry): SitemapN
     case 'moved': {
       const node = findNode(menuForest, entry.menuNode.id)
       if (!node) return menuForest
+      // Refuse to move a node into its own subtree. removeNode would take the
+      // target down with it and the subsequent addChild would find nothing to
+      // attach to, silently deleting the whole branch.
+      if (entry.toMenuParentId !== null && findNode([node], entry.toMenuParentId)) {
+        return menuForest
+      }
       // Preserve children + customizations by carrying the current node (not
       // the entry's stale snapshot). Remove from current spot, re-add under
       // the target parent.
