@@ -50,7 +50,9 @@ The merge policy: **the site index is authoritative for structure and URLs; the 
 | `structure` | where nodes **live** | `add-subtree`, `move`, `remove` |
 | `labels` | cosmetic | `relabel` |
 
-Consolidation rules, in order: promote a menu-only group whose internal pages all sit under a new site page (suppressing the descendant "moves" that were only describing the missing level); pair a same-parent leftover remove + add into one `url-rename`; fold descendant adds into their ancestor; ignore site-index shortcut links; suppress the tool's own sibling-mode `" Home"` suffix.
+Consolidation rules, in order: promote a menu-only group whose internal pages all sit under a new site page (suppressing the descendant "moves" that were only describing the missing level); turn a **label-matched pair whose hrefs differ** into a `url-rename`; pair a same-parent leftover remove + add into one `url-rename`; fold descendant adds into their ancestor; ignore site-index shortcut links; suppress the tool's own sibling-mode `" Home"` suffix.
+
+That second rule exists because `diffForests` cannot express it. Its label fallback pairs "same name, no URL match" nodes, and from then on the href difference has nowhere to go — `renamed` is href-matched-only and `moved` compares *ancestor* paths, which don't change when only the node's own URL did. The pair is reported on `DiffResult.matched` and `plan.ts` decides it is a rename. Before that rule existed these pages vanished from the review entirely and the merged menu kept a dead link.
 
 Defaults that encode the policy: renames keep **your** label, removals are **never** staged automatically, adds and promotions are staged.
 

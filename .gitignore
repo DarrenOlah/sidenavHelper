@@ -12,6 +12,11 @@ dist/
 # Logs
 npm-debug.log*
 
+# Real menu/site-index pastes used for local spot-checks. Working material, not
+# fixtures — the engineered pair under src/lib/__fixtures__/ is what the golden
+# test asserts on. plan.test.ts skips its invariant smoke test when absent.
+example/
+
 # Editor
 .vscode/
 .idea/

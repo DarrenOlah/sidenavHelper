@@ -511,6 +511,87 @@ export function buildMergePlan(
     })
   }
 
+  // ── Rule A2: a page both trees agree on, at a new address ─────────────────
+  //
+  // diffForests pairs these by label when the URL pass finds nothing (its label
+  // fallback). The pair is real — same name, usually the same slot — but the
+  // href difference it found has nowhere to go in a DiffEntry: 'renamed' is
+  // only emitted for href-matched pairs, and 'moved' compares URL-bearing
+  // ANCESTOR paths, which are unchanged when only the node's own URL moved. So
+  // the difference used to be dropped on the floor and the menu kept a dead
+  // link with nothing in the review to say so.
+  //
+  // diff.ts is not wrong to stay quiet — its contract is "what is textually
+  // different", and it does expose both nodes on DiffResult.matched. Deciding
+  // that a same-name page at a new address is a URL rename is a "what happened"
+  // judgement, which is this module's job. It is the same editorial event
+  // Rule B reconstructs from a leftover remove + add, so it produces the same
+  // change kind.
+  for (const pair of diff.matched) {
+    if (pair.matchedBy !== 'label') continue
+    const siteHref = normalizeHrefForMatch(pair.siteNode.href)
+    if (!siteHref || siteHref === normalizeHrefForMatch(pair.menuNode.href)) continue
+
+    // Same name, same slot in the tree, new address — about as clear as this
+    // gets. When the paths differ the page also moved, and diffForests has
+    // already emitted a separate 'moved' for it; the two changes are
+    // complementary (identity fixes the URL, structure re-parents) and their
+    // apply paths don't interact, since 'move' works by node id.
+    const samePlace = pathsEqual(pair.menuPath, pair.sitePath)
+
+    // The label index keys on trimmed + lowercased text, so a label-matched
+    // pair's labels can differ by case only — never in substance. When they are
+    // exactly equal, "keep my label" and "take theirs" do the same thing, so
+    // offering both is a decision the user cannot get wrong or right.
+    const labelsIdentical = pair.menuNode.label.trim() === pair.siteNode.label.trim()
+
+    const siteParent = siteIndex.get(pair.siteNode.id)?.parent ?? null
+    const siteSiblings = siteParent ? siteParent.children : siteForest
+
+    changes.push({
+      id: `rename-url:${pair.menuNode.id}`,
+      kind: 'url-rename',
+      phase: 'identity',
+      title: labelsIdentical
+        ? `${pair.menuNode.label} has a new address`
+        : `${pair.menuNode.label} → ${pair.siteNode.label}`,
+      detail:
+        `Your menu points "${pair.menuNode.label}" at ${pair.menuNode.href}, but the site ` +
+        `index has that page at ${pair.siteNode.href}` +
+        (samePlace
+          ? ' — same name, same place in the menu, different address. '
+          : ' — and also puts it somewhere else in the hierarchy. ') +
+        `Update the address on your existing entry rather than removing and re-adding it, ` +
+        `so its children, position and include state survive.`,
+      dependsOn: [],
+      defaultOptionId: labelsIdentical ? ACCEPT.id : KEEP_LABEL.id,
+      options: labelsIdentical ? [ACCEPT, SPLIT, SKIP] : [KEEP_LABEL, TAKE_LABEL, SPLIT, SKIP],
+      // Nothing is being folded away: the raw diff emitted no entry at all for
+      // this pair. (Rule B uses 2 because it absorbs a remove AND an add.)
+      absorbedCount: 1,
+      menuNode: pair.menuNode,
+      siteNode: pair.siteNode,
+      newHref: pair.siteNode.href,
+      siteLabel: pair.siteNode.label,
+      confidence: samePlace ? 'high' : 'medium',
+      matchReason: samePlace
+        ? 'it has the same name and the same place in your menu'
+        : 'it has the same name, but the site index also moved it',
+      // Only the 'split' option reads these. Splitting means "these are
+      // unrelated after all", so the site's copy takes the old node's slot.
+      parentMenuNodeId: menuIndex.get(pair.menuNode.id)?.parent?.id ?? null,
+      siteSiblingHrefs: siteSiblings.map(c => normalizeHrefForMatch(c.href)),
+      siteSiblingIndex: siteSiblings.indexOf(pair.siteNode),
+    })
+
+    // Deliberately NOT registered in menuNodeBySiteHref with a dependsOn.
+    // The seeding loop above already mapped this site href to this menu node
+    // with dependsOn: null, and that is correct: unlike a promote — where the
+    // parent node does not exist until the change is applied — the parent here
+    // exists either way. Making a child add depend on the URL fix would block
+    // it for no structural reason if the user skips the rename.
+  }
+
   // ── Rule B: pair leftover removes and adds into URL renames ───────────────
   //
   // Same-parent only. A page that was renamed AND moved will surface as a
@@ -1059,8 +1140,13 @@ function applyOne(
           change.siteSiblingIndex,
         )
       }
-      const href = rebaseHref(change.newHref, menuSiteUrl)
-      let next = setExternal(setHref(forest, change.menuNode.id, href), change.menuNode.id, false)
+      // Take the site node's own classification rather than assuming internal.
+      // rebaseHref strips the host when the menu uses root-relative hrefs,
+      // which is right for an internal page and breaks an off-site one — the
+      // same guard rebaseSubtree applies when cloning a subtree.
+      const isExternal = change.siteNode.external ?? false
+      const href = isExternal ? change.newHref : rebaseHref(change.newHref, menuSiteUrl)
+      let next = setExternal(setHref(forest, change.menuNode.id, href), change.menuNode.id, isExternal)
       if (chosen === TAKE_LABEL.id) next = renameNode(next, change.menuNode.id, change.siteLabel)
       return next
     }

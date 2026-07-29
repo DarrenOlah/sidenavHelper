@@ -9,6 +9,16 @@
 //      lowercase label. Only unique-on-both-sides matches; ambiguous matches
 //      are left as added/removed to avoid false positives.
 //
+// A label-pass match is BY DEFINITION a pair whose hrefs differ — that is a
+// URL change, and no DiffEntry describes it. This is deliberate, not an
+// oversight: 'renamed' covers labels, 'moved' covers ancestor paths, and
+// neither is the right shape for "same page, new address". The pair is
+// reported on DiffResult.matched instead, and plan.ts's Rule A2 turns it into
+// a 'url-rename' change — the same one it builds from a leftover remove + add.
+// Deciding that a same-name page at a new address is a rename rather than a
+// deletion plus an unrelated addition is a "what happened" judgement, which
+// belongs in plan.ts, not here.
+//
 // Move detection compares URL-bearing ancestor paths only — empty-href
 // categories in the menu are skipped when computing each side's path, so a
 // child sitting under a logical category in the menu and directly under its

@@ -128,7 +128,7 @@ describe('diffForests — logical categories', () => {
 })
 
 describe('diffForests — label fallback', () => {
-  it('matches by label when URLs differ; does not emit renamed', () => {
+  it('matches by label when URLs differ; reports the href change on the pair, not as an entry', () => {
     const menu = [n('a', '/old-path', 'Contact Us')]
     const site = [n('sa', '/new-path', 'Contact Us')]
     const r = diffForests(menu, site)
@@ -138,6 +138,13 @@ describe('diffForests — label fallback', () => {
     expect(r.matched[0].matchedBy).toBe('label')
     // Same URL-bearing path (both top-level), so no moved either.
     expect(r.entries.filter(e => e.kind === 'moved')).toEqual([])
+    // No entry — but the difference is NOT lost. A label-pass match always has
+    // differing hrefs, and both nodes are on the pair for the caller to compare.
+    // plan.ts's Rule A2 is that caller: it turns this into a 'url-rename'.
+    // Emitting nothing here and nothing there is the bug that let a renamed
+    // page keep its dead link with no review entry to say so.
+    expect(r.matched[0].menuNode.href).toBe('/old-path')
+    expect(r.matched[0].siteNode.href).toBe('/new-path')
   })
 
   it('does NOT match ambiguously when multiple unmatched nodes share a label', () => {

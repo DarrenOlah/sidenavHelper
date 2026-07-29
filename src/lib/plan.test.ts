@@ -1,6 +1,7 @@
 // Node globals are not part of the app's lib set (it targets the browser), and
 // TS 6 no longer auto-includes @types/node. This is the only file that touches
-// the filesystem — it reads the checked-in example menu + site index.
+// the filesystem — it reads the checked-in golden fixtures under __fixtures__,
+// and, when they happen to be present, the working pastes in example/.
 /// <reference types="node" />
 import { describe, it, expect } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
@@ -300,6 +301,177 @@ describe('buildMergePlan — URL renames', () => {
   })
 })
 
+// ── Rule A2 ─────────────────────────────────────────────────────────────────
+
+// A page whose NAME and SLOT are unchanged but whose address moved. diffForests
+// pairs these via its label fallback and emits no entry at all — the href
+// difference lives only on DiffResult.matched. These used to vanish from the
+// review entirely, leaving a dead link in the merged menu.
+describe('buildMergePlan — a matched page at a new address', () => {
+  // The real shape this was found with: menu "Parameters" sits directly under
+  // SRAD but its href still carries the old /Research-and-Commentary/ level.
+  const parametersMenu = () => [
+    n('srad', '/csl/srad/', 'SRAD', [
+      n('rc', '/csl/srad/research-and-commentary/', 'Research and Commentary'),
+      n('param', '/csl/srad/research-and-commentary/parameters/', 'Parameters'),
+    ]),
+  ]
+  const parametersSite = () => [
+    n('s-srad', '/csl/srad/', 'SRAD', [
+      n('s-rc', '/csl/srad/research-and-commentary/', 'Research and Commentary'),
+      n('s-param', '/csl/srad/parameters/', 'Parameters'),
+    ]),
+  ]
+
+  it('emits a url-rename when a label-matched pair has different hrefs', () => {
+    const plan = buildMergePlan(parametersMenu(), parametersSite())
+    const renames = byKind(plan.changes, 'url-rename')
+    expect(renames).toHaveLength(1)
+    const r = renames[0]
+    expect(r.kind === 'url-rename' && r.menuNode.id).toBe('param')
+    expect(r.kind === 'url-rename' && r.newHref).toBe('/csl/srad/parameters/')
+    expect(r.phase).toBe('identity')
+    // Nothing spurious alongside it.
+    expect(byKind(plan.changes, 'remove')).toHaveLength(0)
+    expect(byKind(plan.changes, 'add-subtree')).toHaveLength(0)
+    expect(byKind(plan.changes, 'move')).toHaveLength(0)
+  })
+
+  it('rates an unchanged tree position as high confidence', () => {
+    const plan = buildMergePlan(parametersMenu(), parametersSite())
+    const r = byKind(plan.changes, 'url-rename')[0]
+    expect(r.kind === 'url-rename' && r.confidence).toBe('high')
+  })
+
+  it('rates a page that also moved as medium, and still reports the move', () => {
+    const menu = [
+      n('root', '/hq/', 'HQ', [
+        n('a', '/hq/research/', 'Research', [n('polar', '/hq/research/polar/', 'Polar')]),
+        n('b', '/hq/library/', 'Library'),
+      ]),
+    ]
+    const site = [
+      n('s-root', '/hq/', 'HQ', [
+        n('s-a', '/hq/research/', 'Research'),
+        n('s-b', '/hq/library/', 'Library', [n('s-polar', '/hq/library/polar/', 'Polar')]),
+      ]),
+    ]
+    const plan = buildMergePlan(menu, site)
+    const r = byKind(plan.changes, 'url-rename')[0]
+    expect(r.kind === 'url-rename' && r.confidence).toBe('medium')
+    // The two changes are complementary, not duplicates: identity fixes the
+    // address, structure re-parents.
+    const moves = byKind(plan.changes, 'move')
+    expect(moves).toHaveLength(1)
+    expect(moves[0].kind === 'move' && moves[0].menuNode.id).toBe('polar')
+  })
+
+  it('offers a plain accept when the labels are identical', () => {
+    const plan = buildMergePlan(parametersMenu(), parametersSite())
+    const r = byKind(plan.changes, 'url-rename')[0]
+    // "keep my label" vs "take theirs" is a distinction without a difference
+    // when the labels match, so it is not offered.
+    expect(r.defaultOptionId).toBe('accept')
+    expect(r.options.map(o => o.id)).toEqual(['accept', 'split', 'skip'])
+    expect(r.title).toBe('Parameters has a new address')
+  })
+
+  it('adopts the new URL by default and keeps children, order and include state', () => {
+    const menu = [
+      n('srad', '/csl/srad/', 'SRAD', [
+        n('rc', '/csl/srad/research-and-commentary/', 'Research and Commentary'),
+        {
+          ...n('param', '/csl/srad/research-and-commentary/parameters/', 'Parameters', [
+            n('kid', '/csl/srad/research-and-commentary/parameters/archive/', 'Archive'),
+          ]),
+          included: false,
+        },
+      ]),
+    ]
+    const plan = buildMergePlan(menu, parametersSite())
+    const result = applyPlan(menu, plan, defaultDecisions(plan))
+    const node = findNode(result.forest, 'param')!
+    expect(node.href).toBe('/csl/srad/parameters/')
+    expect(node.label).toBe('Parameters')
+    expect(node.included).toBe(false)
+    expect(node.children.map(c => c.id)).toEqual(['kid'])
+    // Still the second child of SRAD — the node was never removed.
+    expect(findNode(result.forest, 'srad')!.children.map(c => c.id)).toEqual(['rc', 'param'])
+  })
+
+  it('splits into a removal plus an addition in the same slot on request', () => {
+    const menu = parametersMenu()
+    const plan = buildMergePlan(menu, parametersSite())
+    const r = byKind(plan.changes, 'url-rename')[0]
+    const result = applyPlan(menu, plan, { [r.id]: 'split' })
+    expect(findNode(result.forest, 'param')).toBeNull()
+    const kids = findNode(result.forest, 'srad')!.children
+    expect(kids).toHaveLength(2)
+    expect(kids[1].label).toBe('Parameters')
+    expect(kids[1].href).toBe('/csl/srad/parameters/')
+    expect(kids[1].id).not.toBe('param')
+  })
+
+  it('emits nothing when the hrefs already agree', () => {
+    const menu = [n('srad', '/csl/srad/', 'SRAD', [n('param', '/csl/srad/parameters/', 'Parameters')])]
+    const site = [n('s', '/csl/srad/', 'SRAD', [n('sp', '/csl/srad/parameters/', 'Parameters')])]
+    const plan = buildMergePlan(menu, site)
+    expect(byKind(plan.changes, 'url-rename')).toHaveLength(0)
+    expect(plan.changes).toHaveLength(0)
+  })
+
+  it('keeps an external page absolute and flagged when its address changes', () => {
+    const menu = [
+      n('root', '/hq/', 'HQ', [ext('press', 'https://press.example.mil/old/', 'Press')]),
+    ]
+    const site = [
+      n('s-root', '/hq/', 'HQ', [ext('s-press', 'https://press.example.mil/new/', 'Press')]),
+    ]
+    const plan = buildMergePlan(menu, site)
+    expect(byKind(plan.changes, 'url-rename')).toHaveLength(1)
+    // menuSiteUrl '/' means the menu uses root-relative hrefs. rebaseHref would
+    // strip the host off an off-site URL and leave a broken '/new/' link.
+    const result = applyPlan(menu, plan, defaultDecisions(plan), { menuSiteUrl: '/' })
+    const node = findNode(result.forest, 'press')!
+    expect(node.href).toBe('https://press.example.mil/new/')
+    expect(node.external).toBe(true)
+  })
+
+  it('still resolves a child added under the renamed page', () => {
+    // The real knock-on: site PACOM gained an "Affiliates" child while its own
+    // address moved. The add must land under the existing menu node.
+    const menu = [
+      n('srad', '/csl/srad/', 'SRAD', [
+        n('global', '/csl/srad/global/', 'Global', [
+          n('pacom', '/csl/srad/research-and-commentary/pacom/', 'PACOM'),
+        ]),
+      ]),
+    ]
+    const site = [
+      n('s-srad', '/csl/srad/', 'SRAD', [
+        n('s-global', '/csl/srad/global/', 'Global', [
+          n('s-pacom', '/csl/srad/global/pacom/', 'PACOM', [
+            n('s-aff', '/csl/srad/global/pacom/affiliates/', 'Affiliates'),
+          ]),
+        ]),
+      ]),
+    ]
+    const plan = buildMergePlan(menu, site)
+    const add = byKind(plan.changes, 'add-subtree')[0]
+    expect(add.kind === 'add-subtree' && add.parentMenuNodeId).toBe('pacom')
+    expect(add.blockedReason).toBeUndefined()
+    // The add is deliberately NOT gated on the rename: the parent node exists
+    // either way, so skipping the URL fix must not block adding the child.
+    expect(add.dependsOn).toEqual([])
+
+    const result = applyPlan(menu, plan, defaultDecisions(plan))
+    expect(result.blocked).toEqual([])
+    const pacom = findNode(result.forest, 'pacom')!
+    expect(pacom.href).toBe('/csl/srad/global/pacom/')
+    expect(pacom.children.map(c => c.label)).toEqual(['Affiliates'])
+  })
+})
+
 // ── Rule C / D / E ──────────────────────────────────────────────────────────
 
 describe('buildMergePlan — absorption and suppression', () => {
@@ -555,16 +727,13 @@ describe('applyPlan — no orphans', () => {
   })
 })
 
-// ── Golden test on the real example ─────────────────────────────────────────
-
-const MENU_FIXTURE = 'example/old menu.html'
-const SITE_FIXTURE = 'example/site index.html'
-const haveFixtures = existsSync(MENU_FIXTURE) && existsSync(SITE_FIXTURE)
+// ── Golden test ─────────────────────────────────────────────────────────────
 
 // Reproduces exactly what App.tsx does between the two pastes and the plan.
-function pipeline() {
-  const menuParse = parseSitemapHtml(readFileSync(MENU_FIXTURE, 'utf8'))
-  const siteParse = parseSitemapHtml(readFileSync(SITE_FIXTURE, 'utf8'))
+// Paths are relative to the project root, which is where vitest runs.
+function pipeline(menuPath: string, sitePath: string) {
+  const menuParse = parseSitemapHtml(readFileSync(menuPath, 'utf8'))
+  const siteParse = parseSitemapHtml(readFileSync(sitePath, 'utf8'))
 
   let menuForest = applySiteUrl(menuParse.forest, detectSiteUrls(menuParse.forest)[0] ?? '')
   let rootId: string | null = null
@@ -583,139 +752,242 @@ function pipeline() {
   return { menuForest, scoped, rootId, plan: buildMergePlan(menuForest, scoped, { rootId }) }
 }
 
-describe.skipIf(!haveFixtures)('golden: USAWC menu vs a fresh site index', () => {
-  it('collapses 70 raw diff entries into 9 structural decisions', () => {
-    const { plan } = pipeline()
-    const identity = plan.changes.filter(c => c.phase === 'identity')
-    const structure = plan.changes.filter(c => c.phase === 'structure')
-    const labels = plan.changes.filter(c => c.phase === 'labels')
+// A hand-authored pair, checked in so this actually runs in CI. Every node in
+// it exists to exercise one rule — see the comments in the fixtures themselves.
+//
+// Covered here (end-to-end, through the parser and scope detection):
+//   sibling-mode rooting + " Home" suffix suppression
+//   promote, and the descendant "moves" it makes evaporate
+//   an add that depends on that promote
+//   url-rename from a remove + add pair          (high and medium confidence)
+//   url-rename from a LABEL match — Rule A2      (high and medium confidence)
+//   add-subtree with descendants folded in
+//   a duplicate link in the index, suppressed
+//   an href-less menu group with no site counterpart, NOT read as a move
+//   a removal, never staged by default
+//   relabel, both the acronym-expanding and the plain kind
+//   an external link surviving intact
+//   a site branch outside the menu's scope, dropped entirely
+//
+// Deliberately NOT here, because a focused unit test says it better:
+// the no-orphan insert, the duplicate-link refusal, the blocked-parent add,
+// and the unique-residual rename pairing.
+const GOLDEN_MENU = 'src/lib/__fixtures__/golden-menu.html'
+const GOLDEN_SITE = 'src/lib/__fixtures__/golden-site-index.html'
+const golden = () => pipeline(GOLDEN_MENU, GOLDEN_SITE)
 
-    expect(identity).toHaveLength(6)
-    expect(structure).toHaveLength(3)
-    expect(identity.length + structure.length).toBe(9)
-    expect(labels).toHaveLength(11)
+describe('golden: a customized menu vs a fresh site index', () => {
+  it('consolidates the raw diff into twelve decisions', () => {
+    const { plan } = golden()
+    expect(plan.changes.filter(c => c.phase === 'identity')).toHaveLength(5)
+    expect(plan.changes.filter(c => c.phase === 'structure')).toHaveLength(5)
+    expect(plan.changes.filter(c => c.phase === 'labels')).toHaveLength(2)
 
-    // Every "move" in the raw diff was an artifact of Carlisle Experience
-    // having had no URL, or of the DDE shortcut mismatch.
-    expect(byKind(plan.changes, 'move')).toHaveLength(0)
-    expect(byKind(plan.changes, 'remove')).toHaveLength(0)
-    expect(plan.suppressed.moveArtifacts).toBe(37)
-    expect(plan.suppressed.duplicateLinks).toBe(1)
-    expect(plan.suppressed.autoHomeRelabels).toBe(1)
+    expect(plan.suppressed).toEqual({
+      // Alpha and Bravo only looked "moved" because Programs had no URL.
+      moveArtifacts: 2,
+      // The index links /HQ/News/ twice.
+      duplicateLinks: 1,
+      // Maps and Rare Books ride along with Special Collections.
+      absorbedAdds: 2,
+      // "HQ Home" vs the index's "HQ" is this tool's own suffix.
+      autoHomeRelabels: 1,
+    })
   })
 
-  it('promotes Carlisle Experience with no follow-up work', () => {
-    const { plan } = pipeline()
+  it('promotes the href-less group instead of adding a second copy', () => {
+    const { plan } = golden()
     const promotes = byKind(plan.changes, 'promote')
     expect(promotes).toHaveLength(1)
-    const p = promotes[0]
-    expect(p.kind === 'promote' && p.menuNode.label).toBe('Carlisle Experience')
-    expect(p.kind === 'promote' && p.newHref).toMatch(/\/USAWC\/Carlisle-Experience\/$/)
-    // Its real children are identical in both files, so nothing is added under it.
-    const addsUnderCarlisle = byKind(plan.changes, 'add-subtree').filter(
-      c => c.kind === 'add-subtree' && c.parentLabel === 'Carlisle Experience',
+    expect(promotes[0].kind === 'promote' && promotes[0].menuNode.label).toBe('Programs')
+    expect(promotes[0].kind === 'promote' && promotes[0].newHref).toBe(
+      'https://example.mil/HQ/Programs/',
     )
-    expect(addsUnderCarlisle).toHaveLength(0)
+    // And the page the index added under it waits on that decision.
+    const charlie = byKind(plan.changes, 'add-subtree').find(
+      c => c.kind === 'add-subtree' && c.siteNode.label === 'Charlie',
+    )!
+    expect(charlie.dependsOn).toEqual([promotes[0].id])
   })
 
-  it('pairs all five slug renames instead of listing 5 removes and 5 adds', () => {
-    const { plan } = pipeline()
+  it('reports every URL change, whether or not the page was also renamed', () => {
+    const { plan } = golden()
     const renames = byKind(plan.changes, 'url-rename')
-    expect(renames).toHaveLength(5)
-    const pairs = renames.map(c =>
-      c.kind === 'url-rename' ? `${c.menuNode.label} → ${c.siteNode.label}` : '',
-    )
-    expect(pairs.sort()).toEqual([
-      'Emerging Tech → Emerging Technology',
-      'Mideast → Middle East',
-      'Shadows and Steel 2045 → Shadows and Steel',
-      'Strategic Competition → Strategic Competition Center',
-      'Wargame Designer Course (WDC) → WDC',
+    const summary = renames
+      .map(c =>
+        c.kind === 'url-rename'
+          ? `${c.menuNode.label}|${c.confidence}|${c.newHref.replace('https://example.mil', '')}`
+          : '',
+      )
+      .sort()
+    expect(summary).toEqual([
+      // Paired from a leftover remove + add (Rule B).
+      'Emerging Tech|high|/HQ/Research/Emerging-Technology/',
+      'Mideast|medium|/HQ/Research/Middle-East/',
+      // Matched by label, so the raw diff emitted no entry at all (Rule A2).
+      // These are the ones that used to disappear from the review.
+      'Parameters|high|/HQ/Research/Parameters/',
+      'Polar|medium|/HQ/Library/Polar/',
     ])
-    const confidence = new Map(
-      renames.map(c => [
-        c.kind === 'url-rename' ? c.menuNode.label : '',
-        c.kind === 'url-rename' ? c.confidence : '',
-      ]),
-    )
-    expect(confidence.get('Mideast')).toBe('medium')
-    expect(confidence.get('Emerging Tech')).toBe('high')
-    expect(confidence.get('Wargame Designer Course (WDC)')).toBe('high')
   })
 
-  it('adds exactly the three genuinely new branches', () => {
-    const { plan } = pipeline()
-    const adds = byKind(plan.changes, 'add-subtree')
-    const summary = adds
+  it('offers no label choice on a rename where the label did not change', () => {
+    const { plan } = golden()
+    const byLabel = new Map(
+      byKind(plan.changes, 'url-rename').map(c => [c.kind === 'url-rename' ? c.menuNode.label : '', c]),
+    )
+    // Same name on both sides — "keep mine" and "take theirs" are the same act.
+    expect(byLabel.get('Parameters')!.options.map(o => o.id)).toEqual(['accept', 'split', 'skip'])
+    expect(byLabel.get('Parameters')!.title).toBe('Parameters has a new address')
+    // Genuinely renamed, so the choice is real and defaults to the menu's name.
+    expect(byLabel.get('Mideast')!.options.map(o => o.id)).toEqual([
+      'keep-label',
+      'take-label',
+      'split',
+      'skip',
+    ])
+    expect(byLabel.get('Mideast')!.defaultOptionId).toBe('keep-label')
+  })
+
+  it('separates a page that moved from a page that merely changed address', () => {
+    const { plan } = golden()
+    const moves = byKind(plan.changes, 'move')
+    // Polar changed BOTH: identity fixes the address, structure re-parents it.
+    expect(moves).toHaveLength(1)
+    expect(moves[0].kind === 'move' && moves[0].menuNode.label).toBe('Polar')
+    expect(moves[0].kind === 'move' && moves[0].toMenuParentLabel).toBe('Library')
+    // Students and Alumni sit under an href-less "Audiences" heading in the
+    // menu and directly under HQ in the index. That is not a move.
+    expect(moves.some(c => c.kind === 'move' && c.menuNode.label === 'Students')).toBe(false)
+  })
+
+  it('adds only the genuinely new branches, never a second link to a known page', () => {
+    const { plan } = golden()
+    const summary = byKind(plan.changes, 'add-subtree')
       .map(c => (c.kind === 'add-subtree' ? `${c.siteNode.label}+${c.descendantCount}` : ''))
       .sort()
-    expect(summary).toEqual(['National Security Seminar+4', 'News+0', 'PACOM+1'])
+    expect(summary).toEqual(['Charlie+0', 'Directory+0', 'Special Collections+2'])
+    // The index's second /HQ/News/ link never becomes an add, and the whole
+    // out-of-scope "Other Division" branch is filtered out before diffing.
+    expect(summary.some(s => s.startsWith('News'))).toBe(false)
+    expect(summary.some(s => s.startsWith('Staff') || s.startsWith('Contact'))).toBe(false)
   })
 
-  it('keeps every canonical label and never offers the "USAWC Home" non-rename', () => {
-    const { plan } = pipeline()
+  it('never stages a removal, and keeps the menu label on every relabel', () => {
+    const { plan } = golden()
+    const removes = byKind(plan.changes, 'remove')
+    expect(removes).toHaveLength(1)
+    expect(removes[0].kind === 'remove' && removes[0].menuNode.label).toBe('Legacy Report Archive')
+    expect(removes[0].defaultOptionId).toBe('skip')
+
     const labels = byKind(plan.changes, 'relabel')
     expect(labels.every(c => c.defaultOptionId === 'keep')).toBe(true)
-    expect(labels.some(c => c.kind === 'relabel' && c.menuNode.label === 'USAWC Home')).toBe(false)
-    const expanding = labels.filter(c => c.kind === 'relabel' && c.menuLabelExpandsSite)
-    expect(expanding.length).toBeGreaterThanOrEqual(9)
+    const expanding = new Map(
+      labels.map(c => [
+        c.kind === 'relabel' ? c.menuNode.label : '',
+        c.kind === 'relabel' ? c.menuLabelExpandsSite : false,
+      ]),
+    )
+    expect(expanding.get('Research and Analysis Directorate (RAD)')).toBe(true)
+    expect(expanding.get('Journals')).toBe(false)
+    // "HQ Home" → "HQ" is the tool's own suffix and must never be offered.
+    expect(labels.some(c => c.kind === 'relabel' && c.menuNode.label === 'HQ Home')).toBe(false)
   })
 
-  it('applies cleanly: DDE survives intact and no page is lost', () => {
-    const { menuForest, rootId, plan } = pipeline()
+  it('applies the defaults cleanly and loses nothing', () => {
+    const { menuForest, rootId, plan } = golden()
     const before = selectSubtree(menuForest, rootId!)
     const result = applyPlan(menuForest, plan, defaultDecisions(plan), {
       rootId,
       menuSiteUrl: '/',
     })
     expect(result.blocked).toEqual([])
-
     const after = selectSubtree(result.forest, rootId!)
-    // The regression that motivated this rework: accepting the old diff's
-    // bogus DDE move deleted the Department of Distance Education branch.
-    const dde = findNodeByLabel(after, 'Department of Distance Education (DDE)')
-    expect(dde).not.toBeNull()
-    expect(dde!.href).toBe('/USAWC/DDE/')
-    const childLabels = dde!.children.map(c => c.label)
-    expect(childLabels).toContain('Faculty and Staff')
-    expect(childLabels).toContain('Distance Education Program')
-    expect(childLabels).toContain('Defense Strategy Online')
-    expect(childLabels).toContain('Tech Support')
-    expect(childLabels).toContain('National Security Seminar')
 
-    // Carlisle Experience is a real page now, with its original subtree.
-    const carlisle = findNodeByLabel(after, 'Carlisle Experience')!
-    expect(carlisle.href).toBe('/USAWC/Carlisle-Experience/')
-    expect(carlisle.children).toHaveLength(5)
+    // The four URL changes landed, rebased to the menu's root-relative form,
+    // and every page kept the name the user gave it.
+    const parameters = findNodeByLabel(after, 'Parameters')!
+    expect(parameters.href).toBe('/HQ/Research/Parameters/')
+    expect(findNodeByHref(after, '/HQ/Research/Reports/Parameters/')).toBeNull()
+    expect(findNodeByLabel(after, 'Mideast')!.href).toBe('/HQ/Research/Middle-East/')
+    expect(findNodeByLabel(after, 'Emerging Tech')!.href).toBe(
+      '/HQ/Research/Emerging-Technology/',
+    )
 
-    // Renamed pages moved to their new address but kept the menu's name, which
-    // is the whole point of the keep-my-label default.
-    expect(findNodeByHref(after, '/USAWC/CSL/SRAD/Global/Mideast/')).toBeNull()
-    const middleEast = findNodeByHref(after, '/USAWC/CSL/SRAD/Global/Middle-East/')
-    expect(middleEast).not.toBeNull()
-    expect(middleEast!.label).toBe('Mideast')
+    // Polar took both changes: new address AND a new parent.
+    const library = findNodeByLabel(after, 'Library')!
+    const polar = library.children.find(c => c.label === 'Polar')!
+    expect(polar.href).toBe('/HQ/Library/Polar/')
 
-    // Nothing vanished. Exactly 8 nodes arrive — News (1), PACOM plus its
-    // child (2), National Security Seminar plus its four (5). The five renamed
-    // pages are re-used in place rather than removed and re-added.
-    expect(nodeCount(before)).toBe(174)
-    expect(nodeCount(after)).toBe(182)
-    // And the result is free of the collision that breaks "you are here".
+    // Promote kept the heading's own children rather than replacing them.
+    const programs = findNodeByLabel(after, 'Programs')!
+    expect(programs.href).toBe('/HQ/Programs/')
+    expect(programs.children.map(c => c.label)).toEqual(['Alpha', 'Bravo', 'Charlie'])
+
+    // The off-site link keeps its host — rebasing would have broken it.
+    const partner = findNodeByLabel(after, 'Partner Site')!
+    expect(partner.href).toBe('https://partner.example.org/')
+    expect(partner.external).toBe(true)
+
+    // Nothing was dropped, and the removal was not staged. Exactly five nodes
+    // arrive: Charlie, Directory, Special Collections and its two children.
+    // Polar was re-used in place, not removed and re-added.
+    expect(findNodeByLabel(after, 'Legacy Report Archive')).not.toBeNull()
+    expect(nodeCount(before)).toBe(18)
+    expect(nodeCount(after)).toBe(23)
+
+    // And the result cannot break "you are here".
     expect(findDuplicateLinks(after).filter(g => g.severity === 'error')).toEqual([])
   })
 
   it('round-trips through the generator without structural loss', () => {
-    const { menuForest, rootId, plan } = pipeline()
+    const { menuForest, rootId, plan } = golden()
     const result = applyPlan(menuForest, plan, defaultDecisions(plan), {
       rootId,
       menuSiteUrl: '/',
     })
-    const html = generateSidenavHtml(selectSubtree(result.forest, rootId!), { rootMode: 'sibling' })
+    const applied = selectSubtree(result.forest, rootId!)
+    const html = generateSidenavHtml(applied, { rootMode: 'sibling' })
     const reparsed = parseSitemapHtml(html)
-    expect(reparsed.forest.length).toBeGreaterThan(0)
-    expect(reparsed.pageCount).toBeGreaterThan(150)
+    expect(reparsed.pageCount).toBe(nodeCount(applied))
   })
 })
+
+// ── Invariant smoke test over whatever is in example/ ───────────────────────
+
+// example/ holds real pastes the maintainer is working with, not engineered
+// fixtures — its contents change without notice, so asserting on counts or
+// labels here would only produce false failures. What IS worth checking is
+// that applyPlan's invariants survive contact with real-world markup.
+const REAL_MENU = 'example/old menu.html'
+const REAL_SITE = 'example/site index.html'
+const haveRealFixtures = existsSync(REAL_MENU) && existsSync(REAL_SITE)
+
+describe.skipIf(!haveRealFixtures)('invariants against the working example files', () => {
+  it('builds and applies a plan without losing a node or duplicating a link', () => {
+    const { menuForest, rootId, plan } = pipeline(REAL_MENU, REAL_SITE)
+    expect(plan.changes.length).toBeGreaterThan(0)
+
+    const before = selectSubtree(menuForest, rootId!)
+    const errorsBefore = findDuplicateLinks(before).filter(g => g.severity === 'error').length
+
+    // applyPlan throws if a node vanishes that no accepted change removed.
+    const result = applyPlan(menuForest, plan, defaultDecisions(plan), {
+      rootId,
+      menuSiteUrl: '/',
+    })
+    const after = selectSubtree(result.forest, rootId!)
+
+    // No removal is staged by default, so nothing may shrink.
+    expect(nodeCount(after)).toBeGreaterThanOrEqual(nodeCount(before))
+    expect(findDuplicateLinks(after).filter(g => g.severity === 'error').length).toBeLessThanOrEqual(
+      errorsBefore,
+    )
+    // Whatever the plan refused, it refused with a reason rather than guessing.
+    for (const b of result.blocked) expect(b.reason).toBeTruthy()
+  })
+})
+
 
 function findNodeByLabel(roots: SitemapNode[], label: string): SitemapNode | null {
   for (const r of roots) {

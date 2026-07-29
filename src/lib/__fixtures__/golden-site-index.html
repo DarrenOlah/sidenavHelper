@@ -1,0 +1,67 @@
+<!-- GOLDEN FIXTURE — a hand-authored site index in the shape DNN emits,
+     paired with golden-menu.html. See the coverage table in plan.test.ts. -->
+<ul>
+  <li id="li1000"><a href="https://example.mil/HQ/">HQ</a>
+    <ul>
+      <li id="li1010"><a href="https://example.mil/HQ/News/">News</a><ul></ul></li>
+
+      <!-- The menu has this as an href-less heading → promote, not add. -->
+      <li id="li1020"><a href="https://example.mil/HQ/Programs/">Programs</a>
+        <ul>
+          <li id="li1021"><a href="https://example.mil/HQ/Programs/Alpha/">Alpha</a></li>
+          <li id="li1022"><a href="https://example.mil/HQ/Programs/Bravo/">Bravo</a></li>
+          <!-- New, and can only be placed once Programs is a real page. -->
+          <li id="li1023"><a href="https://example.mil/HQ/Programs/Charlie/">Charlie</a></li>
+        </ul>
+      </li>
+
+      <li id="li1030"><a href="https://example.mil/HQ/Library/">Library</a>
+        <ul>
+          <li id="li1031"><a href="https://example.mil/HQ/Library/Archives/">Archives</a></li>
+          <li id="li1032"><a href="https://example.mil/HQ/Library/Journals/">Periodicals</a></li>
+          <!-- Same page as the menu's "Polar" under Research: new address, new
+               parent. Yields a url-rename plus a move. -->
+          <li id="li1033"><a href="https://example.mil/HQ/Library/Polar/">Polar</a></li>
+          <!-- New branch; its two children fold into it rather than listing
+               as separate additions. -->
+          <li id="li1034"><a href="https://example.mil/HQ/Library/Special-Collections/">Special Collections</a>
+            <ul>
+              <li id="li1035"><a href="https://example.mil/HQ/Library/Special-Collections/Maps/">Maps</a></li>
+              <li id="li1036"><a href="https://example.mil/HQ/Library/Special-Collections/Rare-Books/">Rare Books</a></li>
+            </ul>
+          </li>
+        </ul>
+      </li>
+
+      <li id="li1040"><a href="https://example.mil/HQ/Research/">RAD</a>
+        <ul>
+          <li id="li1041"><a href="https://example.mil/HQ/Research/Emerging-Technology/">Emerging Technology</a></li>
+          <li id="li1042"><a href="https://example.mil/HQ/Research/Middle-East/">Middle East</a></li>
+          <!-- The /Reports/ level the menu's href still carries is gone. -->
+          <li id="li1043"><a href="https://example.mil/HQ/Research/Parameters/">Parameters</a></li>
+        </ul>
+      </li>
+
+      <!-- The menu groups these two under an href-less "Audiences" heading. -->
+      <li id="li1050"><a href="https://example.mil/HQ/Students/">Students</a></li>
+      <li id="li1051"><a href="https://example.mil/HQ/Alumni/">Alumni</a></li>
+
+      <li id="li1060"><a href="https://example.mil/HQ/Directory/">Directory</a></li>
+
+      <!-- Second link to a page already listed above. Adding it would put the
+           same path in the menu twice and break "you are here". -->
+      <li id="li1070"><a href="https://example.mil/HQ/News/">News</a></li>
+
+      <li id="li1080" class="lilast"><a href="https://partner.example.org/">Partner Site</a></li>
+    </ul>
+  </li>
+
+  <!-- Outside the menu's branch. Scope detection must drop this whole subtree
+       rather than proposing it as a pile of additions. -->
+  <li id="li2000" class="lilast"><a href="https://example.mil/OTHER/">Other Division</a>
+    <ul>
+      <li id="li2001"><a href="https://example.mil/OTHER/Staff/">Staff</a></li>
+      <li id="li2002"><a href="https://example.mil/OTHER/Contact/">Contact</a></li>
+    </ul>
+  </li>
+</ul>

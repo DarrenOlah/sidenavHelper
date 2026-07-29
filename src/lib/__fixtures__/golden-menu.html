@@ -1,0 +1,79 @@
+<!-- GOLDEN FIXTURE — a hand-authored au-sidenav menu, paired with
+     golden-site-index.html. Every entry exists to exercise one consolidation
+     rule; see the coverage table in plan.test.ts. Do not "tidy" it.
+
+     Shape: sibling-mode rooting — the root page is the first item as a leaf,
+     with its children following as top-level siblings. detectSiblingModeRoot
+     folds this back into a rooted forest on paste. -->
+<nav class="au-sidenav" aria-label="In this section">
+  <h3 class="au-sidenav__header">In this section</h3>
+  <ul class="au-sidenav__list">
+    <!-- Sibling-mode root. The " Home" suffix is this tool's own doing, so the
+         relabel to the index's plain "HQ" must be suppressed, not offered. -->
+    <li class="au-sidenav__item"><a href="/HQ/">HQ Home</a></li>
+
+    <!-- The index links this page twice; only one add may ever be proposed. -->
+    <li class="au-sidenav__item"><a href="/HQ/News/">News</a></li>
+
+    <!-- href-less group that the index has as a real page → promote. Its two
+         children then stop looking "moved", because the move entries only ever
+         described the level this menu was missing. -->
+    <li class="au-sidenav__item">
+      <span class="au-sidenav__text">Programs</span>
+      <button type="button" class="au-sidenav__toggle" aria-label="Toggle submenu"></button>
+      <ul class="au-sidenav__sublist">
+        <li class="au-sidenav__item"><a href="/HQ/Programs/Alpha/">Alpha</a></li>
+        <li class="au-sidenav__item"><a href="/HQ/Programs/Bravo/">Bravo</a></li>
+      </ul>
+    </li>
+
+    <li class="au-sidenav__item">
+      <a href="/HQ/Library/">Library</a>
+      <button type="button" class="au-sidenav__toggle" aria-label="Toggle submenu"></button>
+      <ul class="au-sidenav__sublist">
+        <li class="au-sidenav__item"><a href="/HQ/Library/Archives/">Archives</a></li>
+        <!-- Plain relabel: the index calls this "Periodicals". Neither name
+             contains the other, so menuLabelExpandsSite must be false. -->
+        <li class="au-sidenav__item"><a href="/HQ/Library/Journals/">Journals</a></li>
+      </ul>
+    </li>
+
+    <!-- Relabel where the menu spells out what the index abbreviates. -->
+    <li class="au-sidenav__item">
+      <a href="/HQ/Research/">Research and Analysis Directorate (RAD)</a>
+      <button type="button" class="au-sidenav__toggle" aria-label="Toggle submenu"></button>
+      <ul class="au-sidenav__sublist">
+        <!-- url-rename via a leftover remove + add, paired on an abbreviated
+             word: emerging-tech → emerging-technology. High confidence. -->
+        <li class="au-sidenav__item"><a href="/HQ/Research/Emerging-Tech/">Emerging Tech</a></li>
+        <!-- Same, but paired only on bigram similarity. Medium confidence. -->
+        <li class="au-sidenav__item"><a href="/HQ/Research/Mideast/">Mideast</a></li>
+        <!-- url-rename via a LABEL match: same name, same slot, but the href
+             still carries a /Reports/ level the index has dropped. This is the
+             case that used to vanish from the review entirely. High. -->
+        <li class="au-sidenav__item"><a href="/HQ/Research/Reports/Parameters/">Parameters</a></li>
+        <!-- Also a label match, but the index moved it under Library as well —
+             so this yields a url-rename AND a move. Medium. -->
+        <li class="au-sidenav__item"><a href="/HQ/Research/Polar/">Polar</a></li>
+        <!-- Gone from the index. Three removals against two additions under
+             this parent, so the unique-residual fallback cannot fire and this
+             stays an honest removal. -->
+        <li class="au-sidenav__item"><a href="/HQ/Research/Legacy-Report-Archive/">Legacy Report Archive</a></li>
+      </ul>
+    </li>
+
+    <!-- href-less group with NO counterpart in the index. Its children sit
+         directly under HQ in the index, which must NOT read as a move. -->
+    <li class="au-sidenav__item">
+      <span class="au-sidenav__text">Audiences</span>
+      <button type="button" class="au-sidenav__toggle" aria-label="Toggle submenu"></button>
+      <ul class="au-sidenav__sublist">
+        <li class="au-sidenav__item"><a href="/HQ/Students/">Students</a></li>
+        <li class="au-sidenav__item"><a href="/HQ/Alumni/">Alumni</a></li>
+      </ul>
+    </li>
+
+    <!-- Off-site link: must survive the merge with its host intact. -->
+    <li class="au-sidenav__item"><a class="external" href="https://partner.example.org/" rel="noopener noreferrer" target="_blank">Partner Site</a></li>
+  </ul>
+</nav>
