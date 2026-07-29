@@ -47,14 +47,16 @@ The merge policy: **the site index is authoritative for structure and URLs; the 
 | phase | means | change kinds |
 |---|---|---|
 | `identity` | what a node **is** | `promote`, `demote`, `url-rename` |
-| `structure` | where nodes **live** | `add-subtree`, `move`, `remove` |
+| `structure` | where nodes **live** | `add-subtree`, `move`, `remove`, `reorder` |
 | `labels` | cosmetic | `relabel` |
 
 Consolidation rules, in order: promote a menu-only group whose internal pages all sit under a new site page (suppressing the descendant "moves" that were only describing the missing level); turn a **label-matched pair whose hrefs differ** into a `url-rename`; pair a same-parent leftover remove + add into one `url-rename`; fold descendant adds into their ancestor; ignore site-index shortcut links; suppress the tool's own sibling-mode `" Home"` suffix.
 
 That second rule exists because `diffForests` cannot express it. Its label fallback pairs "same name, no URL match" nodes, and from then on the href difference has nowhere to go — `renamed` is href-matched-only and `moved` compares *ancestor* paths, which don't change when only the node's own URL did. The pair is reported on `DiffResult.matched` and `plan.ts` decides it is a rename. Before that rule existed these pages vanished from the review entirely and the merged menu kept a dead link.
 
-Defaults that encode the policy: renames keep **your** label, removals are **never** staged automatically, adds and promotions are staged.
+`reorder` is the one rule that reads position rather than identity, and it is per-container by construction: one change per parent, naming only the complement of the longest increasing subsequence of the site-side indices, so a single displaced page reads as one page moving rather than a list being rewritten around it. Two guards keep it off the href-less-category tolerance that `UrlPath` already encodes — a menu parent with no site counterpart is skipped whole, and a child whose counterpart is not a *direct* child of that counterpart is not a participant. Without them the `Audiences` fixture and the forest top level both report phantom reorders. Applying it is slot-preserving (`reorderChildrenSubset`): only participants move, and only among the slots they already occupy, which is why the change carries no `dependsOn` and composes with an add or a removal under the same parent either way. It does need to run *first* among them, though — `insertAtSitePosition` anchors a new page against the siblings already in the menu, so resequencing before inserting is what lets an accepted add land where the site index puts it. An add and a reorder under one parent share a `docOrder`, so `orderChanges` breaks that tie explicitly (`kindRank`) rather than leaving it to the order `buildMergePlan` pushed them in.
+
+Defaults that encode the policy: renames keep **your** label, removals are **never** staged automatically, **order is yours** and is never rewritten without a click, adds and promotions are staged.
 
 Two invariants in `applyPlan`, each enforced per change with the change refused rather than half-applied:
 

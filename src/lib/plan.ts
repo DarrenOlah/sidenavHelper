@@ -41,6 +41,7 @@ import {
   findNode,
   removeNode,
   renameNode,
+  reorderChildrenSubset,
   selectSubtree,
   setExternal,
   setHref,
@@ -57,6 +58,7 @@ export type ChangeKind =
   | 'url-rename'   // same page, new slug (a paired add + remove)
   | 'add-subtree'  // page in the index that the menu lacks, with its descendants
   | 'move'         // page re-parented in the index
+  | 'reorder'      // same parent, siblings listed in a different order
   | 'remove'       // page in the menu that the index no longer has
   | 'relabel'      // same URL, different page name
 
@@ -128,6 +130,27 @@ export type MergeChange =
       menuNode: SitemapNode
       toMenuParentId: string | null
       toMenuParentLabel: string
+    })
+  | (ChangeBase & {
+      kind: 'reorder'
+      // The menu parent whose children are resequenced. null = forest top level.
+      parentMenuNodeId: string | null
+      parentLabel: string
+      // Participating children in the order the site index lists them. This is
+      // what gets applied; only these ids move, and only among the slots they
+      // already occupy.
+      toOrderIds: string[]
+      // Labels parallel to toOrderIds, carried so the review can draw the
+      // resulting sequence without re-walking the forest.
+      toOrderLabels: string[]
+      // The subset that actually has to move to get there — the complement of
+      // the longest increasing subsequence. This is what gets REPORTED, so one
+      // displaced page reads as one page moving rather than a whole list being
+      // rewritten around it.
+      movedIds: string[]
+      movedLabels: string[]
+      // Mover id → the sibling it currently follows, null when it is first.
+      wasAfterLabels: Record<string, string | null>
     })
   | (ChangeBase & {
       kind: 'remove'
@@ -206,6 +229,17 @@ const TAKE_SITE_LABEL: ChangeOption = {
   id: 'take',
   label: "Use the site index's label",
   description: 'Replace your page name with the one from the site index.',
+}
+const KEEP_MY_ORDER: ChangeOption = {
+  id: 'keep-order',
+  label: 'Keep my order',
+  description: 'Your arrangement wins.',
+  isSkip: true,
+}
+const TAKE_SITE_ORDER: ChangeOption = {
+  id: 'take-order',
+  label: "Use the site index's order",
+  description: 'Move these entries into the positions the site index lists them in.',
 }
 
 // ── Small text helpers used by rename pairing ───────────────────────────────
@@ -385,6 +419,42 @@ function pathsEqual(a: readonly string[], b: readonly string[]): boolean {
   if (a.length !== b.length) return false
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
   return true
+}
+
+// Positions of a longest strictly-increasing subsequence of `seq`. Patience
+// sorting with parent pointers — O(n log n), though at menu sizes that is
+// beside the point.
+//
+// Used to answer "which of these siblings actually moved". Everything in the
+// subsequence is already in relative site order and can stay where it is; the
+// complement is the minimum set that has to be relocated. Reporting the
+// complement instead of the whole list is the difference between "Annual
+// Estimate and IRPs moved to the end" and "all five of these are in a different
+// position" — the same consolidation instinct as the rest of this module.
+export function longestIncreasingSubsequence(seq: readonly number[]): number[] {
+  if (seq.length === 0) return []
+  // tails[k] = index into seq of the smallest tail of an increasing run of
+  // length k+1. prev[i] = index of i's predecessor in the run ending at i.
+  const tails: number[] = []
+  const prev = new Array<number>(seq.length).fill(-1)
+  for (let i = 0; i < seq.length; i++) {
+    let lo = 0
+    let hi = tails.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (seq[tails[mid]] < seq[i]) lo = mid + 1
+      else hi = mid
+    }
+    if (lo > 0) prev[i] = tails[lo - 1]
+    tails[lo] = i
+  }
+  const out: number[] = []
+  let cur = tails[tails.length - 1]
+  while (cur !== -1) {
+    out.push(cur)
+    cur = prev[cur]
+  }
+  return out.reverse()
 }
 
 // ── buildMergePlan ──────────────────────────────────────────────────────────
@@ -800,6 +870,113 @@ export function buildMergePlan(
     })
   }
 
+  // ── Rule D: siblings the index lists in a different order ─────────────────
+  //
+  // Reported per PARENT, not per displaced child. One page moving one slot
+  // shifts every page it passes, and enumerating those shifts individually is
+  // the failure mode the rest of this module exists to prevent.
+  //
+  // Two guards keep this off the menu's own logical groupings. diffForests
+  // already tolerates an href-less category by skipping it when building
+  // UrlPath; the equivalent here is to compare two child lists only when they
+  // are genuinely sibling sets on BOTH sides:
+  //
+  //   1. the menu parent must have a site counterpart at all — an href-less
+  //      group the index has no page for has no sequence to be compared against;
+  //   2. each child must map to a DIRECT child of that counterpart — pages the
+  //      menu tucks under a logical group but the index lists further up are not
+  //      siblings of that group's other children, and lining the two lists up by
+  //      position compares unrelated sequences.
+  //
+  // Drop either guard and the real USAWC pastes report a phantom reorder at the
+  // top level and another under the menu's "Audiences" heading.
+  const siteNodeByMenuId = new Map<string, SitemapNode>()
+  for (const pair of diff.matched) siteNodeByMenuId.set(pair.menuNode.id, pair.siteNode)
+  const reparentedMenuIds = new Set(
+    changes.filter(c => c.kind === 'move').map(c => (c.kind === 'move' ? c.menuNode.id : '')),
+  )
+
+  interface ReorderScope {
+    parent: SitemapNode | null
+    menuKids: SitemapNode[]
+    siteKids: SitemapNode[]
+  }
+  // The top level is always a candidate; with a picked root the forest holds a
+  // single node, so the participant count below discards it on its own.
+  const reorderScopes: ReorderScope[] = [
+    { parent: null, menuKids: menuForest, siteKids: siteForest },
+  ]
+  for (const { node } of menuIndex.values()) {
+    if (node.children.length < 2) continue
+    const counterpart = siteNodeByMenuId.get(node.id)
+    if (!counterpart) continue // guard 1
+    reorderScopes.push({ parent: node, menuKids: node.children, siteKids: counterpart.children })
+  }
+
+  for (const { parent, menuKids, siteKids } of reorderScopes) {
+    const sitePosition = new Map(siteKids.map((c, i) => [c.id, i]))
+    const participants: Array<{ menuNode: SitemapNode; at: number }> = []
+    for (const child of menuKids) {
+      // A page being re-parented has no meaningful position here any more.
+      if (reparentedMenuIds.has(child.id)) continue
+      const site = siteNodeByMenuId.get(child.id)
+      if (!site) continue // menu-only: an external link, or something curated in
+      const at = sitePosition.get(site.id)
+      if (at === undefined) continue // guard 2
+      participants.push({ menuNode: child, at })
+    }
+    if (participants.length < 2) continue
+
+    // Everything in the longest increasing run is already in relative site order
+    // and can stay put. The complement is the minimum set that has to move.
+    const staying = new Set(longestIncreasingSubsequence(participants.map(p => p.at)))
+    const moved = participants.filter((_, i) => !staying.has(i))
+    if (moved.length === 0) continue
+
+    const target = participants.slice().sort((a, b) => a.at - b.at)
+    const movedIds = moved.map(p => p.menuNode.id)
+    const movedLabels = moved.map(p => p.menuNode.label)
+    // Where each mover sits today, so the review can show what it is leaving as
+    // well as where it lands. Read off menuKids, not participants: the sibling
+    // above may well be an external link that never made it into the sequence.
+    const wasAfterLabels: Record<string, string | null> = {}
+    for (const p of moved) {
+      const at = menuKids.findIndex(c => c.id === p.menuNode.id)
+      wasAfterLabels[p.menuNode.id] = at > 0 ? menuKids[at - 1].label : null
+    }
+    const where = moved.map(p => {
+      const at = target.findIndex(t => t.menuNode.id === p.menuNode.id)
+      return at === 0
+        ? `"${p.menuNode.label}" moves to the top`
+        : `"${p.menuNode.label}" moves after "${target[at - 1].menuNode.label}"`
+    })
+    const parentLabel = parent ? parent.label : ''
+
+    changes.push({
+      id: `reorder:${parent ? parent.id : '__root__'}`,
+      kind: 'reorder',
+      phase: 'structure',
+      title:
+        `Reorder ${moved.length} item${moved.length === 1 ? '' : 's'} ` +
+        (parentLabel ? `under "${parentLabel}"` : 'at the top level'),
+      detail:
+        `The site index lists these pages in a different order: ${where.join(', ')}. ` +
+        `Only the position of your existing entries changes — nothing is added, removed ` +
+        `or moved to a different section.`,
+      dependsOn: [],
+      defaultOptionId: KEEP_MY_ORDER.id,
+      options: [KEEP_MY_ORDER, TAKE_SITE_ORDER],
+      absorbedCount: moved.length,
+      parentMenuNodeId: parent ? parent.id : null,
+      parentLabel,
+      toOrderIds: target.map(p => p.menuNode.id),
+      toOrderLabels: target.map(p => p.menuNode.label),
+      movedIds,
+      movedLabels,
+      wasAfterLabels,
+    })
+  }
+
   // ── Removals — never staged by default ────────────────────────────────────
   //
   // A truncated paste or a mis-picked compare scope both look exactly like
@@ -919,6 +1096,19 @@ function isAutoHomeSuffix(
 
 const PHASE_RANK: Record<ChangePhase, number> = { identity: 0, structure: 1, labels: 2 }
 
+// A reorder and an add under the same parent share a docOrder, so without this
+// the tie falls to whatever order buildMergePlan happened to push them in. The
+// reorder has to win: insertAtSitePosition anchors the new page against the
+// siblings already in the menu, so resequencing first is what lets an accepted
+// add land where the site index actually puts it. Applying it the other way
+// round leaves the new page wherever the pre-reorder arrangement implied, which
+// is not the order the user just asked for.
+//
+// Safe in both directions. The reorder's participants are all present before
+// anything is inserted, and a re-parented child is excluded from the sequence
+// by construction, so nothing later in the phase can invalidate it.
+const kindRank = (c: MergeChange): number => (c.kind === 'reorder' ? 0 : 1)
+
 // Phase, then menu document order, then a stable topological pass so a change
 // never precedes something it depends on. Dependencies always run identity →
 // structure or ancestor-add → descendant-add, so this settles in one sweep.
@@ -930,7 +1120,12 @@ function orderChanges(changes: MergeChange[], menuIndex: Map<string, IndexEntry>
   }
   const sorted = changes
     .slice()
-    .sort((a, b) => PHASE_RANK[a.phase] - PHASE_RANK[b.phase] || docOrder(a) - docOrder(b))
+    .sort(
+      (a, b) =>
+        PHASE_RANK[a.phase] - PHASE_RANK[b.phase] ||
+        docOrder(a) - docOrder(b) ||
+        kindRank(a) - kindRank(b),
+    )
 
   const emitted = new Set<string>()
   const out: MergeChange[] = []
@@ -1173,6 +1368,16 @@ function applyOne(
       const parentId = resolveInsertParent(forest, change.toMenuParentId, rootId)
       if (parentId === undefined) return 'The page it would move under is no longer in the menu.'
       return addChild(removeNode(forest, change.menuNode.id), parentId, node)
+    }
+
+    case 'reorder': {
+      if (change.parentMenuNodeId !== null && !findNode(forest, change.parentMenuNodeId)) {
+        return 'The section it reorders is no longer in the menu.'
+      }
+      // Nothing is created or destroyed, so neither applyPlan invariant can be
+      // tripped: mustSurvive is untouched and the duplicate-link count cannot
+      // rise. Ids dropped by an earlier accepted change are ignored.
+      return reorderChildrenSubset(forest, change.parentMenuNodeId, change.toOrderIds)
     }
 
     case 'remove': {

@@ -17,8 +17,11 @@
 
       <li id="li1030"><a href="https://example.mil/HQ/Library/">Library</a>
         <ul>
-          <li id="li1031"><a href="https://example.mil/HQ/Library/Archives/">Archives</a></li>
+          <!-- Listed ahead of Archives, which the menu has first → one reorder
+               under Library. Note this page is ALSO relabelled, so it exercises
+               a positional change and a cosmetic one landing on one node. -->
           <li id="li1032"><a href="https://example.mil/HQ/Library/Journals/">Periodicals</a></li>
+          <li id="li1031"><a href="https://example.mil/HQ/Library/Archives/">Archives</a></li>
           <!-- Same page as the menu's "Polar" under Research: new address, new
                parent. Yields a url-rename plus a move. -->
           <li id="li1033"><a href="https://example.mil/HQ/Library/Polar/">Polar</a></li>

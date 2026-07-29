@@ -10,6 +10,7 @@ import {
   buildMergePlan,
   defaultDecisions,
   isAcronymOf,
+  longestIncreasingSubsequence,
   scoreRename,
   type Decisions,
   type MergeChange,
@@ -472,6 +473,272 @@ describe('buildMergePlan — a matched page at a new address', () => {
   })
 })
 
+// ── Sibling reorders ────────────────────────────────────────────────────────
+
+describe('longestIncreasingSubsequence', () => {
+  it('returns the indices of a longest strictly increasing run', () => {
+    expect(longestIncreasingSubsequence([3, 4, 0, 1, 2])).toEqual([2, 3, 4])
+    expect(longestIncreasingSubsequence([0, 1, 2, 3, 4, 6, 7, 5])).toEqual([0, 1, 2, 3, 4, 5, 6])
+  })
+
+  it('handles the degenerate inputs', () => {
+    expect(longestIncreasingSubsequence([])).toEqual([])
+    expect(longestIncreasingSubsequence([7])).toEqual([0])
+    expect(longestIncreasingSubsequence([4, 3, 2, 1])).toHaveLength(1)
+  })
+})
+
+describe('buildMergePlan — siblings in a different order', () => {
+  // The shape found under "Research and Commentary": two entries the editor had
+  // pulled to the top are last in the index. Site order is [c, d, e, a, b], so
+  // the menu sequence reads [3, 4, 0, 1, 2].
+  const shuffledMenu = () => [
+    n('root', '/hq/', 'HQ', [
+      n('a', '/hq/a/', 'A'),
+      n('b', '/hq/b/', 'B'),
+      n('c', '/hq/c/', 'C'),
+      n('d', '/hq/d/', 'D'),
+      n('e', '/hq/e/', 'E'),
+    ]),
+  ]
+  const shuffledSite = () => [
+    n('s-root', '/hq/', 'HQ', [
+      n('s-c', '/hq/c/', 'C'),
+      n('s-d', '/hq/d/', 'D'),
+      n('s-e', '/hq/e/', 'E'),
+      n('s-a', '/hq/a/', 'A'),
+      n('s-b', '/hq/b/', 'B'),
+    ]),
+  ]
+
+  it('emits one change per parent, not one per displaced sibling', () => {
+    const plan = buildMergePlan(shuffledMenu(), shuffledSite(), { rootId: 'root' })
+    const reorders = byKind(plan.changes, 'reorder')
+    expect(reorders).toHaveLength(1)
+    expect(reorders[0].phase).toBe('structure')
+    expect(reorders[0].kind === 'reorder' && reorders[0].parentMenuNodeId).toBe('root')
+  })
+
+  it('names only the minimum set that has to move', () => {
+    // Three of the five keep their relative order, so reporting all five as
+    // "moved" would be true but useless. The LIS complement is A and B.
+    const plan = buildMergePlan(shuffledMenu(), shuffledSite(), { rootId: 'root' })
+    const r = plan.changes.find(c => c.kind === 'reorder')!
+    expect(r.kind === 'reorder' && r.movedIds).toEqual(['a', 'b'])
+    expect(r.kind === 'reorder' && r.toOrderIds).toEqual(['c', 'd', 'e', 'a', 'b'])
+    expect(r.absorbedCount).toBe(2)
+  })
+
+  it('records where each mover currently sits', () => {
+    const plan = buildMergePlan(shuffledMenu(), shuffledSite(), { rootId: 'root' })
+    const r = plan.changes.find(c => c.kind === 'reorder')!
+    expect(r.kind === 'reorder' && r.wasAfterLabels).toEqual({ a: null, b: 'A' })
+  })
+
+  it('keeps your order by default', () => {
+    const plan = buildMergePlan(shuffledMenu(), shuffledSite(), { rootId: 'root' })
+    const r = plan.changes.find(c => c.kind === 'reorder')!
+    expect(r.defaultOptionId).toBe('keep-order')
+    expect(r.options.find(o => o.id === r.defaultOptionId)?.isSkip).toBe(true)
+    const kept = applyPlan(shuffledMenu(), plan, defaultDecisions(plan), { rootId: 'root' })
+    expect(findNode(kept.forest, 'root')!.children.map(c => c.id)).toEqual([
+      'a', 'b', 'c', 'd', 'e',
+    ])
+  })
+
+  it('applies the site order when accepted', () => {
+    const menu = shuffledMenu()
+    const plan = buildMergePlan(menu, shuffledSite(), { rootId: 'root' })
+    const r = plan.changes.find(c => c.kind === 'reorder')!
+    const result = applyPlan(menu, plan, { ...defaultDecisions(plan), [r.id]: 'take-order' }, {
+      rootId: 'root',
+    })
+    expect(result.blocked).toHaveLength(0)
+    expect(findNode(result.forest, 'root')!.children.map(c => c.id)).toEqual([
+      'c', 'd', 'e', 'a', 'b',
+    ])
+  })
+
+  it('says nothing when the orders already agree', () => {
+    const site = [
+      n('s-root', '/hq/', 'HQ', [
+        n('s-a', '/hq/a/', 'A'),
+        n('s-b', '/hq/b/', 'B'),
+        n('s-c', '/hq/c/', 'C'),
+        n('s-d', '/hq/d/', 'D'),
+        n('s-e', '/hq/e/', 'E'),
+      ]),
+    ]
+    const plan = buildMergePlan(shuffledMenu(), site, { rootId: 'root' })
+    expect(byKind(plan.changes, 'reorder')).toHaveLength(0)
+  })
+
+  // ── The two false positives a naive index comparison produces ─────────────
+
+  it('says nothing about an href-less group with no counterpart in the index', () => {
+    // "Audiences": a grouping the editor invented. Its children sit directly
+    // under HQ in the index, which is exactly the tolerance UrlPath already
+    // encodes — there is no site sequence to compare its children against.
+    const menu = [
+      n('root', '/hq/', 'HQ', [
+        cat('aud', 'Audiences', [
+          n('stu', '/hq/students/', 'Students'),
+          n('alu', '/hq/alumni/', 'Alumni'),
+        ]),
+      ]),
+    ]
+    const site = [
+      n('s-root', '/hq/', 'HQ', [
+        n('s-alu', '/hq/alumni/', 'Alumni'),
+        n('s-stu', '/hq/students/', 'Students'),
+      ]),
+    ]
+    const plan = buildMergePlan(menu, site, { rootId: 'root' })
+    expect(byKind(plan.changes, 'reorder')).toHaveLength(0)
+    expect(byKind(plan.changes, 'move')).toHaveLength(0)
+  })
+
+  it('says nothing about children that are not siblings on the site side', () => {
+    // Mirror image: the index groups A under an href-less category. A and B are
+    // siblings in the menu but not in the index, so their positions are not
+    // comparable and there is no reorder to report.
+    const menu = [
+      n('root', '/hq/', 'HQ', [n('a', '/hq/a/', 'A'), n('b', '/hq/b/', 'B')]),
+    ]
+    const site = [
+      n('s-root', '/hq/', 'HQ', [
+        n('s-b', '/hq/b/', 'B'),
+        cat('s-cat', 'Category', [n('s-a', '/hq/a/', 'A')]),
+      ]),
+    ]
+    const plan = buildMergePlan(menu, site, { rootId: 'root' })
+    expect(byKind(plan.changes, 'reorder')).toHaveLength(0)
+  })
+
+  // ── Composition with the rest of the plan ─────────────────────────────────
+
+  it('leaves out a child that is being re-parented', () => {
+    // C's position under the root is moot once the move lands it under B.
+    const menu = [
+      n('root', '/hq/', 'HQ', [
+        n('a', '/hq/a/', 'A'),
+        n('b', '/hq/b/', 'B'),
+        n('c', '/hq/c/', 'C'),
+      ]),
+    ]
+    const site = [
+      n('s-root', '/hq/', 'HQ', [
+        n('s-b', '/hq/b/', 'B', [n('s-c', '/hq/c/', 'C')]),
+        n('s-a', '/hq/a/', 'A'),
+      ]),
+    ]
+    const plan = buildMergePlan(menu, site, { rootId: 'root' })
+    expect(byKind(plan.changes, 'move')).toHaveLength(1)
+    const r = plan.changes.find(c => c.kind === 'reorder')!
+    expect(r.kind === 'reorder' && r.toOrderIds).toEqual(['b', 'a'])
+  })
+
+  // The reason the change carries no dependsOn edges: the apply primitive only
+  // shuffles the slots its own participants occupy, so whatever else the plan
+  // does under this parent survives it either way.
+  it('composes with an accepted addition under the same parent', () => {
+    const menu = [
+      n('root', '/hq/', 'HQ', [n('a', '/hq/a/', 'A'), n('b', '/hq/b/', 'B')]),
+    ]
+    const site = [
+      n('s-root', '/hq/', 'HQ', [
+        n('s-b', '/hq/b/', 'B'),
+        n('s-new', '/hq/new/', 'New Page'),
+        n('s-a', '/hq/a/', 'A'),
+      ]),
+    ]
+    const plan = buildMergePlan(menu, site, { rootId: 'root' })
+    const r = plan.changes.find(c => c.kind === 'reorder')!
+    const add = plan.changes.find(c => c.kind === 'add-subtree')!
+    const result = applyPlan(
+      menu,
+      plan,
+      { ...defaultDecisions(plan), [r.id]: 'take-order', [add.id]: 'accept' },
+      { rootId: 'root' },
+    )
+    expect(result.blocked).toHaveLength(0)
+    const kids = findNode(result.forest, 'root')!.children
+    // The index's exact sequence, which takes both changes cooperating: the
+    // reorder runs first (see kindRank in orderChanges), so insertAtSitePosition
+    // anchors "New Page" against an already-resequenced B. Apply them the other
+    // way round and it lands last instead.
+    expect(kids.map(c => c.label)).toEqual(['B', 'New Page', 'A'])
+  })
+
+  it('sequences the reorder ahead of an add under the same parent', () => {
+    // Both changes derive their docOrder from the same parent, so the tie is
+    // what decides the outcome above. Pin it rather than leaving it to the
+    // order buildMergePlan happens to push them in.
+    const menu = [
+      n('root', '/hq/', 'HQ', [n('a', '/hq/a/', 'A'), n('b', '/hq/b/', 'B')]),
+    ]
+    const site = [
+      n('s-root', '/hq/', 'HQ', [
+        n('s-b', '/hq/b/', 'B'),
+        n('s-new', '/hq/new/', 'New Page'),
+        n('s-a', '/hq/a/', 'A'),
+      ]),
+    ]
+    const plan = buildMergePlan(menu, site, { rootId: 'root' })
+    const structure = plan.changes.filter(c => c.phase === 'structure').map(c => c.kind)
+    expect(structure.indexOf('reorder')).toBeLessThan(structure.indexOf('add-subtree'))
+  })
+
+  it('composes with an accepted addition when the order is kept', () => {
+    const menu = [
+      n('root', '/hq/', 'HQ', [n('a', '/hq/a/', 'A'), n('b', '/hq/b/', 'B')]),
+    ]
+    const site = [
+      n('s-root', '/hq/', 'HQ', [
+        n('s-b', '/hq/b/', 'B'),
+        n('s-new', '/hq/new/', 'New Page'),
+        n('s-a', '/hq/a/', 'A'),
+      ]),
+    ]
+    const plan = buildMergePlan(menu, site, { rootId: 'root' })
+    const add = plan.changes.find(c => c.kind === 'add-subtree')!
+    const result = applyPlan(menu, plan, { ...defaultDecisions(plan), [add.id]: 'accept' }, {
+      rootId: 'root',
+    })
+    expect(result.blocked).toHaveLength(0)
+    expect(findNode(result.forest, 'root')!.children.map(c => c.label)).toContain('New Page')
+    const labels = findNode(result.forest, 'root')!.children.map(c => c.label)
+    expect(labels.indexOf('A')).toBeLessThan(labels.indexOf('B'))
+  })
+
+  it('refuses the change when its section is gone', () => {
+    const menu = [
+      n('root', '/hq/', 'HQ', [
+        n('grp', '/hq/grp/', 'Group', [
+          n('a', '/hq/grp/a/', 'A'),
+          n('b', '/hq/grp/b/', 'B'),
+        ]),
+      ]),
+    ]
+    const site = [
+      n('s-root', '/hq/', 'HQ', [
+        n('s-grp', '/hq/grp/', 'Group', [
+          n('s-b', '/hq/grp/b/', 'B'),
+          n('s-a', '/hq/grp/a/', 'A'),
+        ]),
+      ]),
+    ]
+    const plan = buildMergePlan(menu, site, { rootId: 'root' })
+    const r = plan.changes.find(c => c.kind === 'reorder')!
+    // Simulate the section having been deleted by hand between review and apply.
+    const without = [n('root', '/hq/', 'HQ', [])]
+    const result = applyPlan(without, plan, { ...defaultDecisions(plan), [r.id]: 'take-order' }, {
+      rootId: 'root',
+    })
+    expect(result.blocked.map(b => b.id)).toContain(r.id)
+  })
+})
+
 // ── Rule C / D / E ──────────────────────────────────────────────────────────
 
 describe('buildMergePlan — absorption and suppression', () => {
@@ -764,6 +1031,7 @@ function pipeline(menuPath: string, sitePath: string) {
 //   add-subtree with descendants folded in
 //   a duplicate link in the index, suppressed
 //   an href-less menu group with no site counterpart, NOT read as a move
+//   a sibling reorder, and the same group's children NOT read as reordered
 //   a removal, never staged by default
 //   relabel, both the acronym-expanding and the plain kind
 //   an external link surviving intact
@@ -777,10 +1045,10 @@ const GOLDEN_SITE = 'src/lib/__fixtures__/golden-site-index.html'
 const golden = () => pipeline(GOLDEN_MENU, GOLDEN_SITE)
 
 describe('golden: a customized menu vs a fresh site index', () => {
-  it('consolidates the raw diff into twelve decisions', () => {
+  it('consolidates the raw diff into thirteen decisions', () => {
     const { plan } = golden()
     expect(plan.changes.filter(c => c.phase === 'identity')).toHaveLength(5)
-    expect(plan.changes.filter(c => c.phase === 'structure')).toHaveLength(5)
+    expect(plan.changes.filter(c => c.phase === 'structure')).toHaveLength(6)
     expect(plan.changes.filter(c => c.phase === 'labels')).toHaveLength(2)
 
     expect(plan.suppressed).toEqual({
@@ -859,6 +1127,49 @@ describe('golden: a customized menu vs a fresh site index', () => {
     // Students and Alumni sit under an href-less "Audiences" heading in the
     // menu and directly under HQ in the index. That is not a move.
     expect(moves.some(c => c.kind === 'move' && c.menuNode.label === 'Students')).toBe(false)
+  })
+
+  it('reports the one section whose siblings are in a different order', () => {
+    const { plan } = golden()
+    const reorders = byKind(plan.changes, 'reorder')
+    expect(reorders).toHaveLength(1)
+    const r = reorders[0]
+    expect(r.kind === 'reorder' && r.parentLabel).toBe('Library')
+    expect(r.kind === 'reorder' && r.movedLabels).toEqual(['Archives'])
+    // Polar is arriving here by a move and Special Collections by an add, so
+    // neither is a participant — only the two pages already sitting here are.
+    expect(r.kind === 'reorder' && r.toOrderLabels).toEqual(['Journals', 'Archives'])
+    // "Audiences" has no counterpart in the index, so its children are never
+    // compared. This is the false positive a raw index comparison produces.
+    expect(reorders.some(c => c.kind === 'reorder' && c.parentLabel === 'Audiences')).toBe(false)
+    expect(reorders.some(c => c.kind === 'reorder' && c.parentMenuNodeId === null)).toBe(false)
+  })
+
+  it('leaves the order alone unless the reorder is accepted', () => {
+    const { menuForest, rootId, plan } = golden()
+    const libraryLabels = (forest: SitemapNode[]) =>
+      forest[0].children.find(c => c.label === 'Library')!.children.map(c => c.label)
+
+    // Everything else in the plan accepted, the reorder left at its default.
+    // Your order stands, and the new branch anchors inside it — the index has
+    // Special Collections after Archives, so that is where it goes.
+    const kept = libraryLabels(applyPlan(menuForest, plan, defaultDecisions(plan), { rootId }).forest)
+    expect(kept).toEqual(['Archives', 'Special Collections', 'Journals', 'Polar'])
+
+    const r = plan.changes.find(c => c.kind === 'reorder')!
+    const result = applyPlan(menuForest, plan, { ...defaultDecisions(plan), [r.id]: 'take-order' }, {
+      rootId,
+    })
+    expect(result.blocked).toHaveLength(0)
+    // The index's order for everything the merge can place: Periodicals first,
+    // then Archives, with the new branch after them both. Polar is the known
+    // exception — it arrives by a move, and move appends rather than placing.
+    expect(libraryLabels(result.forest)).toEqual([
+      'Journals',
+      'Archives',
+      'Special Collections',
+      'Polar',
+    ])
   })
 
   it('adds only the genuinely new branches, never a second link to a known page', () => {
@@ -984,6 +1295,25 @@ describe.skipIf(!haveRealFixtures)('invariants against the working example files
       errorsBefore,
     )
     // Whatever the plan refused, it refused with a reason rather than guessing.
+    for (const b of result.blocked) expect(b.reason).toBeTruthy()
+  })
+
+  // Reorders are off by default, so the run above never exercises one. Turning
+  // them all on is the interesting case: it is the only change kind that
+  // rewrites sibling arrays wholesale.
+  it('survives accepting every reorder', () => {
+    const { menuForest, rootId, plan } = pipeline(REAL_MENU, REAL_SITE)
+    const decisions: Decisions = { ...defaultDecisions(plan) }
+    for (const c of plan.changes) if (c.kind === 'reorder') decisions[c.id] = 'take-order'
+
+    const before = selectSubtree(menuForest, rootId!)
+    const result = applyPlan(menuForest, plan, decisions, { rootId, menuSiteUrl: '/' })
+    const after = selectSubtree(result.forest, rootId!)
+
+    // A reorder is a permutation, so it can neither lose a node nor create a
+    // second link to a page that was only linked once.
+    expect(nodeCount(after)).toBeGreaterThanOrEqual(nodeCount(before))
+    expect(findDuplicateLinks(after).filter(g => g.severity === 'error')).toHaveLength(0)
     for (const b of result.blocked) expect(b.reason).toBeTruthy()
   })
 })

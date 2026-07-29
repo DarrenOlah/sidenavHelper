@@ -344,6 +344,43 @@ function reorderArray<T>(arr: T[], from: number, to: number): T[] {
   return next
 }
 
+// Reorder ONLY the listed children under `parentId` into `orderedIds`, leaving
+// every other child in the slot it already occupies. Ids that are no longer
+// present are ignored. Pass `null` to target the top-level forest.
+//
+// Slot preservation is the point, and it is what lets the merge review emit a
+// reorder that composes with the rest of a plan without any dependency edges:
+// a page inserted by an accepted add keeps the position insertAtSitePosition
+// gave it, a menu-only external link keeps its position, and a node dropped by
+// an accepted removal simply falls out of the sequence. Reordering the whole
+// child list instead would drag all three around.
+export function reorderChildrenSubset(
+  roots: SitemapNode[],
+  parentId: string | null,
+  orderedIds: string[],
+): SitemapNode[] {
+  if (parentId === null) return reorderSubset(roots, orderedIds)
+  return mapTree(roots, n =>
+    n.id === parentId ? { ...n, children: reorderSubset(n.children, orderedIds) } : n,
+  )
+}
+
+function reorderSubset(children: SitemapNode[], orderedIds: string[]): SitemapNode[] {
+  const wanted = new Set(orderedIds)
+  const slots: number[] = []
+  for (let i = 0; i < children.length; i++) {
+    if (wanted.has(children[i].id)) slots.push(i)
+  }
+  if (slots.length < 2) return children
+  const byId = new Map(children.map(c => [c.id, c]))
+  // Drop ids that are no longer here, so `sequence` and `slots` line up.
+  const sequence = orderedIds.map(id => byId.get(id)).filter((n): n is SitemapNode => n !== undefined)
+  if (sequence.length !== slots.length) return children
+  const next = children.slice()
+  for (let k = 0; k < slots.length; k++) next[slots[k]] = sequence[k]
+  return next
+}
+
 // Move `id` out of its current parent and insert immediately after that parent
 // at the grandparent's level. If the node's parent is at the top of the forest,
 // the node is inserted into the forest right after its parent. No-op when the

@@ -5,6 +5,7 @@ import {
   renameNode,
   setIncluded,
   reorderSiblings,
+  reorderChildrenSubset,
   promoteNode,
   demoteNode,
   selectSubtree,
@@ -136,6 +137,64 @@ describe('reorderSiblings', () => {
     const forest = buildSampleForest()
     const next = reorderSiblings(forest, null, 0, 99)
     expect(next.map(n => n.id)).toEqual(['b', 'c', 'a'])
+  })
+})
+
+describe('reorderChildrenSubset', () => {
+  // p, q, r, s under one parent; the merge review only ever names the subset
+  // that exists on both sides of the diff.
+  function forestWithFour(): SitemapNode[] {
+    return [parent('p', 'P', [leaf('w', 'W'), leaf('x', 'X'), leaf('y', 'Y'), leaf('z', 'Z')])]
+  }
+
+  it('reorders the listed children under a parent', () => {
+    const next = reorderChildrenSubset(forestWithFour(), 'p', ['z', 'y', 'x', 'w'])
+    expect(findNode(next, 'p')?.children.map(c => c.id)).toEqual(['z', 'y', 'x', 'w'])
+  })
+
+  it('reorders the top level when parentId is null', () => {
+    const next = reorderChildrenSubset(buildSampleForest(), null, ['c', 'a', 'b'])
+    expect(next.map(n => n.id)).toEqual(['c', 'a', 'b'])
+  })
+
+  // The whole reason this is not just reorderSiblings: a menu-only entry such as
+  // an external link never appears in the diff, so it is not in orderedIds — and
+  // it must not be dragged along by the pages that are.
+  it('leaves a non-participant in the slot it already occupies', () => {
+    const next = reorderChildrenSubset(forestWithFour(), 'p', ['z', 'y', 'w'])
+    expect(findNode(next, 'p')?.children.map(c => c.id)).toEqual(['z', 'x', 'y', 'w'])
+  })
+
+  it('ignores ids that are no longer in the forest', () => {
+    const next = reorderChildrenSubset(forestWithFour(), 'p', ['z', 'gone', 'w'])
+    expect(findNode(next, 'p')?.children.map(c => c.id)).toEqual(['z', 'x', 'y', 'w'])
+  })
+
+  it('is a no-op when the children are already in the requested order', () => {
+    const forest = forestWithFour()
+    const next = reorderChildrenSubset(forest, 'p', ['w', 'x', 'y', 'z'])
+    expect(findNode(next, 'p')?.children.map(c => c.id)).toEqual(['w', 'x', 'y', 'z'])
+  })
+
+  it('returns the forest untouched when fewer than two ids are present', () => {
+    const forest = forestWithFour()
+    expect(reorderChildrenSubset(forest, 'p', ['y'])).toStrictEqual(forest)
+    expect(reorderChildrenSubset(forest, 'p', [])).toStrictEqual(forest)
+  })
+
+  it('does not touch other branches', () => {
+    const forest = [
+      parent('p', 'P', [leaf('w', 'W'), leaf('x', 'X')]),
+      parent('q', 'Q', [leaf('m', 'M'), leaf('n', 'N')]),
+    ]
+    const next = reorderChildrenSubset(forest, 'p', ['x', 'w'])
+    expect(findNode(next, 'q')?.children.map(c => c.id)).toEqual(['m', 'n'])
+  })
+
+  it('leaves the forest alone when the parent is unknown', () => {
+    const forest = forestWithFour()
+    const next = reorderChildrenSubset(forest, 'nope', ['z', 'w'])
+    expect(findNode(next, 'p')?.children.map(c => c.id)).toEqual(['w', 'x', 'y', 'z'])
   })
 })
 

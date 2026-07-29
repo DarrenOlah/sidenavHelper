@@ -21,6 +21,7 @@ import {
   isStaged,
   planCounts,
   previewPlan,
+  longestIncreasingSubsequence,
   type ChangePhase,
   type Decisions,
   type MergeChange,
@@ -59,6 +60,7 @@ const KIND_GLYPH: Record<MergeChange['kind'], string> = {
   'url-rename': '⇄',
   'add-subtree': '＋',
   move: '→',
+  reorder: '⇅',
   remove: '−',
   relabel: '✎',
 }
@@ -69,6 +71,7 @@ const KIND_TITLE: Record<MergeChange['kind'], string> = {
   'url-rename': 'Renamed (new URL)',
   'add-subtree': 'New page',
   move: 'Moved',
+  reorder: 'Different order',
   remove: 'Gone from site index',
   relabel: 'Different label',
 }
@@ -88,7 +91,7 @@ function ConfidenceChip({ level }: { level: 'high' | 'medium' | 'low' }) {
 
 // ── Staged-result markers ───────────────────────────────────────────────────
 
-type Marker = 'added' | 'changed' | null
+type Marker = 'added' | 'changed' | 'moved' | null
 
 function collectById(roots: SitemapNode[], out = new Map<string, SitemapNode>()): Map<string, SitemapNode> {
   for (const n of roots) {
@@ -96,6 +99,32 @@ function collectById(roots: SitemapNode[], out = new Map<string, SitemapNode>())
     collectById(n.children, out)
   }
   return out
+}
+
+// parent id (null at top level) → its children's ids, in order.
+function collectSiblings(
+  roots: SitemapNode[],
+  parentId: string | null = null,
+  out = new Map<string | null, string[]>(),
+): Map<string | null, string[]> {
+  out.set(parentId, roots.map(n => n.id))
+  for (const n of roots) collectSiblings(n.children, n.id, out)
+  return out
+}
+
+// Which of `ids` had to change position to get from the before-order to here.
+// A reorder alters nothing about a node itself, so position is the only
+// evidence — but a plain index comparison would also flag every sibling pushed
+// down by an insert, and every sibling of a single mover. Restricting to ids
+// present on both sides absorbs the first, and taking the complement of the
+// longest increasing subsequence absorbs the second, so the marks in the
+// preview match the movers the plan named.
+function movedAmongSiblings(beforeIds: string[], afterIds: string[]): string[] {
+  const was = new Map(beforeIds.map((id, i) => [id, i]))
+  const common = afterIds.filter(id => was.has(id))
+  if (common.length < 2) return []
+  const staying = new Set(longestIncreasingSubsequence(common.map(id => was.get(id)!)))
+  return common.filter((_, i) => !staying.has(i))
 }
 
 // Compare the staged forest against the current one so the preview can mark
@@ -112,6 +141,15 @@ function diffMarkers(before: SitemapNode[], after: SitemapNode[]): Map<string, M
     }
   }
   walk(after)
+
+  // Positional marks last, and never over a stronger one: a page that was
+  // renamed AND shifted is more usefully shown as renamed.
+  const beforeSiblings = collectSiblings(before)
+  for (const [parentId, afterIds] of collectSiblings(after)) {
+    for (const id of movedAmongSiblings(beforeSiblings.get(parentId) ?? [], afterIds)) {
+      if (!markers.has(id)) markers.set(id, 'moved')
+    }
+  }
   return markers
 }
 
@@ -124,6 +162,8 @@ function focusTargets(change: MergeChange | undefined): { ids: Set<string>; href
   if ('menuNode' in change) ids.add(change.menuNode.id)
   if (change.kind === 'add-subtree') hrefs.add(lastPath(change.siteNode.href))
   if (change.kind === 'url-rename') hrefs.add(lastPath(change.newHref))
+  // Only the movers, not every participant — the rest are staying put.
+  if (change.kind === 'reorder') for (const id of change.movedIds) ids.add(id)
   return { ids, hrefs }
 }
 
@@ -252,6 +292,82 @@ function SiteContext({
         ))}
         {end < all.length && (
           <li className="text-[11px] text-gray-400">… {all.length - end} more below</li>
+        )}
+      </ul>
+    </div>
+  )
+}
+
+// The resulting sequence for a reorder, windowed around the items that move.
+// Showing the whole list would be the wrong emphasis: the point of the LIS in
+// buildMergePlan is that one displaced page reads as one page moving, and a
+// pane listing all forty siblings undoes that. Everything within
+// CONTEXT_RADIUS of a mover is kept so each one is shown with the neighbours it
+// lands between; the rest collapses to a count.
+function ReorderContext({
+  labels,
+  movedAt,
+  wasAfter,
+}: {
+  labels: string[]
+  // Indices into `labels` that had to move to reach this order.
+  movedAt: Set<number>
+  // Mover index → the label it used to follow, or null when it was first.
+  wasAfter: Map<number, string | null>
+}) {
+  const keep = new Set<number>()
+  for (const at of movedAt) {
+    for (let i = at - CONTEXT_RADIUS; i <= at + CONTEXT_RADIUS; i++) {
+      if (i >= 0 && i < labels.length) keep.add(i)
+    }
+  }
+
+  const rows: Array<{ at: number } | { gap: number }> = []
+  let gap = 0
+  labels.forEach((_, i) => {
+    if (keep.has(i)) {
+      if (gap > 0) rows.push({ gap })
+      gap = 0
+      rows.push({ at: i })
+    } else {
+      gap++
+    }
+  })
+  if (gap > 0) rows.push({ gap })
+
+  return (
+    <div className="mt-3 rounded border border-gray-200 bg-gray-50/60 p-2">
+      <div className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
+        The order this would produce
+      </div>
+      <ul className="ml-1 space-y-0.5">
+        {rows.map((row, i) =>
+          'gap' in row ? (
+            <li key={`gap-${i}`} className="text-[11px] text-gray-400">
+              … {row.gap} unchanged
+            </li>
+          ) : (
+            <li key={labels[row.at] + row.at}>
+              <div
+                className={`text-[11px] truncate ${
+                  movedAt.has(row.at) ? 'text-blue-800 font-medium' : 'text-gray-500'
+                }`}
+              >
+                {movedAt.has(row.at) ? '▸ ' : '  '}
+                {labels[row.at]}
+                {movedAt.has(row.at) && (
+                  <span className="ml-1.5 font-normal text-blue-600">← moves here</span>
+                )}
+              </div>
+              {movedAt.has(row.at) && (
+                <div className="ml-3 text-[10px] text-gray-400">
+                  {wasAfter.get(row.at) === null
+                    ? 'was: first'
+                    : `was: after “${wasAfter.get(row.at)}”`}
+                </div>
+              )}
+            </li>
+          ),
         )}
       </ul>
     </div>
@@ -419,6 +535,20 @@ function DetailPane({
             <SubtreeOutline node={change.siteNode} />
           </div>
         )}
+        {change.kind === 'reorder' && (
+          <ReorderContext
+            labels={change.toOrderLabels}
+            movedAt={new Set(change.movedIds.map(id => change.toOrderIds.indexOf(id)))}
+            wasAfter={
+              new Map(
+                change.movedIds.map(id => {
+                  const at = change.toOrderIds.indexOf(id)
+                  return [at, change.wasAfterLabels[id] ?? null] as const
+                }),
+              )
+            }
+          />
+        )}
         {change.absorbedCount > 2 && change.kind === 'promote' && (
           <p className="mt-2 text-[11px] text-gray-500">
             {change.absorbedCount - 1} “moved” entries hidden — they only existed because the
@@ -569,16 +699,19 @@ function ResultTree({
       {nodes.map(n => {
         const marker = markers.get(n.id) ?? null
         const isFocused = focus.ids.has(n.id) || focus.hrefs.has(lastPath(n.href))
-        const glyph = marker === 'added' ? '+' : marker === 'changed' ? '~' : ' '
+        const glyph =
+          marker === 'added' ? '+' : marker === 'changed' ? '~' : marker === 'moved' ? '⇅' : ' '
         const cls = !n.included
           ? 'text-gray-300 line-through'
           : marker === 'added'
             ? 'text-green-800'
             : marker === 'changed'
               ? 'text-amber-800'
-              : n.href.trim() === ''
-                ? 'text-gray-400 italic'
-                : 'text-gray-600'
+              : marker === 'moved'
+                ? 'text-blue-800'
+                : n.href.trim() === ''
+                  ? 'text-gray-400 italic'
+                  : 'text-gray-600'
         return (
           <li key={n.id}>
             <div
@@ -593,7 +726,9 @@ function ResultTree({
                     ? 'text-green-600'
                     : marker === 'changed'
                       ? 'text-amber-600'
-                      : 'text-transparent'
+                      : marker === 'moved'
+                        ? 'text-blue-600'
+                        : 'text-transparent'
                 }`}
               >
                 {glyph}
@@ -823,7 +958,8 @@ export default function ReviewMode({
             <span className="text-[11px] font-semibold text-gray-700">MENU AFTER</span>
             <span className="text-[10px] text-gray-400">
               <span className="text-green-600">+</span> added{' '}
-              <span className="text-amber-600">~</span> changed
+              <span className="text-amber-600">~</span> changed{' '}
+              <span className="text-blue-600">⇅</span> moved
             </span>
           </div>
           {!preview && (
