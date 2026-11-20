@@ -1239,11 +1239,14 @@ function SiteUrlField({
 
   // Re-sync draft when the applied value changes from outside (new paste,
   // revert button). The guard prevents resetting the input mid-typing in the
-  // common case where the commit we're hearing back is our own.
-  useEffect(() => {
+  // common case where the commit we're hearing back is our own. Done during
+  // render (tracking the previous prop) rather than in an effect, per
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevAppliedSiteUrl, setPrevAppliedSiteUrl] = useState(appliedSiteUrl)
+  if (appliedSiteUrl !== prevAppliedSiteUrl) {
+    setPrevAppliedSiteUrl(appliedSiteUrl)
     if (appliedSiteUrl !== draft) setDraft(appliedSiteUrl)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appliedSiteUrl])
+  }
 
   // Debounce committing valid drafts so a burst of keystrokes only fires one
   // applySiteUrl + preview regeneration at the end.
@@ -1367,7 +1370,13 @@ interface AccentColorPickerProps {
 function AccentColorPicker({ value, onChange }: AccentColorPickerProps) {
   const [draft, setDraft] = useState(value)
 
-  useEffect(() => { setDraft(value) }, [value])
+  // Sync the draft when the parent value changes, during render rather than
+  // in an effect (avoids an extra cascading render).
+  const [prevValue, setPrevValue] = useState(value)
+  if (value !== prevValue) {
+    setPrevValue(value)
+    setDraft(value)
+  }
 
   const handleDraft = (raw: string) => {
     setDraft(raw)
