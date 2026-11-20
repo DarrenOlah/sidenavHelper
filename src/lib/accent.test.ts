@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import sidenavCss from '../vendor/au-sidenav/sidenav.css?raw'
-import { ACCENT_PRESETS, DEFAULT_ACCENT, applyAccentColor, normalizeHex } from './accent'
+import { ACCENT_PRESETS, DEFAULT_ACCENT, applyAccentColor, detectAccentColor, normalizeHex } from './accent'
 
 describe('accent marker', () => {
   // Drift guard: applyAccentColor is a regex replace against sidenav.css. If
@@ -101,5 +101,38 @@ describe('ACCENT_PRESETS', () => {
 
   it('includes the default accent color', () => {
     expect(ACCENT_PRESETS.some(p => p.hex === DEFAULT_ACCENT)).toBe(true)
+  })
+})
+
+describe('detectAccentColor', () => {
+  it('round-trips a color through applyAccentColor', () => {
+    for (const { hex } of ACCENT_PRESETS) {
+      expect(detectAccentColor(applyAccentColor(sidenavCss, hex))).toBe(hex)
+    }
+    expect(detectAccentColor(applyAccentColor(sidenavCss, '#12AB9F'))).toBe('#12AB9F')
+  })
+
+  it('reads the unmodified vendored default (Army Gold)', () => {
+    expect(detectAccentColor(sidenavCss)).toBe(DEFAULT_ACCENT)
+  })
+
+  it('survives stripped comments, lowercase, 3-digit shorthand and the background shorthand', () => {
+    const rule = (decl: string) =>
+      `.au-sidenav .au-sidenav__list > .au-sidenav__item--current-section::after { content: ""; ${decl} border-radius: 99rem; }`
+    expect(detectAccentColor(rule('background-color: #676c4a;'))).toBe('#676C4A')
+    expect(detectAccentColor(rule('background-color:#abc;'))).toBe('#AABBCC')
+    expect(detectAccentColor(rule('background: #804331;'))).toBe('#804331')
+  })
+
+  it('ignores background colors on other rules', () => {
+    const css = '.au-sidenav__link:hover { background-color: #123456; }'
+    expect(detectAccentColor(css)).toBeNull()
+  })
+
+  it('returns null when there is no accent rule or the value is not a hex', () => {
+    expect(detectAccentColor('')).toBeNull()
+    expect(detectAccentColor('<ul><li><a href="/a/">A</a></li></ul>')).toBeNull()
+    expect(detectAccentColor('.au-sidenav__item--current-section::after { background-color: red; }')).toBeNull()
+    expect(detectAccentColor('.au-sidenav__item--current-section::after { background-color: #12345; }')).toBeNull()
   })
 })

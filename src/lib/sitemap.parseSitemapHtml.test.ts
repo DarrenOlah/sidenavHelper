@@ -42,8 +42,8 @@ describe('parseBestSitemap', () => {
 
 describe('parseSitemapHtml', () => {
   it('returns an empty forest for empty input', () => {
-    expect(parseSitemapHtml('')).toEqual({ forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '', isAuSidenavOutput: false })
-    expect(parseSitemapHtml('   ')).toEqual({ forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '', isAuSidenavOutput: false })
+    expect(parseSitemapHtml('')).toEqual({ forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '', isAuSidenavOutput: false, detectedAccentColor: null })
+    expect(parseSitemapHtml('   ')).toEqual({ forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '', isAuSidenavOutput: false, detectedAccentColor: null })
   })
 
   describe('isAuSidenavOutput', () => {
@@ -247,5 +247,33 @@ describe('parseSitemapHtml', () => {
     const { forest } = parseSitemapHtml('<ul><li><a href="/a/">Alpha</a></li></ul>')
     expect(forest[0].label).toBe(forest[0].defaultLabel)
     expect(forest[0].label).toBe('Alpha')
+  })
+})
+
+describe('detectedAccentColor', () => {
+  const css = '.au-sidenav .au-sidenav__list > .au-sidenav__item--current-section::after { background-color: #676C4A; /* accent */ }'
+  const nav = '<nav class="au-sidenav"><ul class="au-sidenav__list"><li><a href="/a/">A</a></li></ul></nav>'
+
+  it('recovers the accent color from a pasted menu with its <style> block', () => {
+    expect(parseSitemapHtml(`<style>\n${css}\n</style>\n${nav}`).detectedAccentColor).toBe('#676C4A')
+  })
+
+  it('recovers it from a code-view paste where the markup is entity-escaped', () => {
+    const escaped = `<div><span>&lt;style&gt;</span><span>${css}</span><span>&lt;/style&gt;</span></div>`
+    expect(parseSitemapHtml(escaped).detectedAccentColor).toBe('#676C4A')
+  })
+
+  it('is null for a menu pasted without CSS, and for a site index', () => {
+    expect(parseSitemapHtml(nav).detectedAccentColor).toBeNull()
+    expect(parseSitemapHtml('<ul><li><a href="/a/">A</a></li></ul>').detectedAccentColor).toBeNull()
+  })
+
+  it('parseBestSitemap keeps the color from whichever flavor carried it', () => {
+    // text/html (rendered copy) wins on the tree but has no <style>;
+    // text/plain carried the CSS — the color must still come through.
+    const richHtml = '<nav class="au-sidenav"><ul class="au-sidenav__list"><li><a href="/a/">A</a></li><li><a href="/b/">B</a></li></ul></nav>'
+    const { result } = parseBestSitemap(richHtml, `<style>${css}</style>`)
+    expect(result.pageCount).toBe(2)
+    expect(result.detectedAccentColor).toBe('#676C4A')
   })
 })

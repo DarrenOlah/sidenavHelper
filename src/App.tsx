@@ -120,6 +120,9 @@ interface State {
   includeCss: boolean
   includeJs: boolean
   accentColor: string
+  // Accent color recovered from the last menu paste, shown as a confirmation
+  // under the paste box. Empty when the paste carried no accent rule.
+  detectedAccentColor: string
   pageCount: number
   maxDepth: number
   parseError: string
@@ -187,6 +190,7 @@ const INITIAL_STATE: State = {
   includeCss: true,
   includeJs: true,
   accentColor: DEFAULT_ACCENT,
+  detectedAccentColor: '',
   pageCount: 0,
   maxDepth: 0,
   parseError: '',
@@ -267,9 +271,10 @@ export default function App() {
   const pasteRef = useRef<HTMLDivElement | null>(null)
   const sitePasteRef = useRef<HTMLDivElement | null>(null)
 
-  const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, accentColor, pageCount, maxDepth, parseError, previewCurrentPath, addedIds, siteUrl, detectedSiteUrl, detectedSiteUrls, isMenuPaste, siteIndexForest, siteIndexParseError, siteIndexUrl, detectedSiteIndexUrl, detectedSiteIndexUrls, decisions, manualScope, undoForest } = state
+  const { forest, rootId, headerText, rootMode, hrefMode, includeCss, includeJs, accentColor, detectedAccentColor, pageCount, maxDepth, parseError, previewCurrentPath, addedIds, siteUrl, detectedSiteUrl, detectedSiteUrls, isMenuPaste, siteIndexForest, siteIndexParseError, siteIndexUrl, detectedSiteIndexUrl, detectedSiteIndexUrls, decisions, manualScope, undoForest } = state
 
   const hasForest = forest.length > 0
+  const detectedAccentName = ACCENT_PRESETS.find(p => p.hex === detectedAccentColor)?.name
   const hasPickedRoot = rootId !== null && findNode(forest, rootId) !== null
   const activeForest = useMemo(() => rootId ? selectSubtree(forest, rootId) : forest, [forest, rootId])
 
@@ -376,6 +381,11 @@ export default function App() {
       detectedSiteUrl: detected,
       detectedSiteUrls: detectedList,
       headerText: hasCustomHeader ? result.detectedHeaderText : s.headerText,
+      // Round-trip a previously-generated menu's accent color. Only override
+      // when the paste carried one, so a site-index paste (or a menu copied
+      // without its <style>) keeps the user's current choice.
+      accentColor: result.detectedAccentColor ?? s.accentColor,
+      detectedAccentColor: result.detectedAccentColor ?? '',
       // A new menu paste invalidates any pending compare flow.
       isMenuPaste: result.isAuSidenavOutput,
       siteIndexHtml: '',
@@ -885,6 +895,18 @@ export default function App() {
               {hasForest && detectedSiteUrl && (
                 <p className="mt-1 text-xs text-green-700 font-medium">
                   ✓ Detected site URL <code className="font-mono">{detectedSiteUrl}</code>
+                </p>
+              )}
+              {hasForest && detectedAccentColor && (
+                <p className="mt-1 text-xs text-green-700 font-medium flex items-center gap-1">
+                  ✓ Detected accent color
+                  <span
+                    aria-hidden="true"
+                    className="inline-block w-3 h-3 rounded-sm border border-gray-300"
+                    style={{ backgroundColor: detectedAccentColor }}
+                  />
+                  <code className="font-mono">{detectedAccentColor}</code>
+                  {detectedAccentName && <span className="font-normal">({detectedAccentName})</span>}
                 </p>
               )}
               {/* Collapsed sub-menus are display:none in the rendered sidenav, so
