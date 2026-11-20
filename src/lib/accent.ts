@@ -46,3 +46,23 @@ export function normalizeHex(input: string): string | null {
   }
   return null
 }
+
+// Recover the accent color from a previously-generated menu's CSS so a pasted
+// menu round-trips its color instead of snapping back to the default. Keyed on
+// the accent rule's selector (not the `/* accent */` comment) because DNN /
+// CKEditor may strip comments on save. Accepts #RGB or #RRGGBB in either
+// `background-color` or the `background` shorthand. Returns the normalized
+// #RRGGBB form, or null when the paste carried no accent rule (e.g. a fresh
+// site index, or a menu copied without its <style> block).
+const ACCENT_RULE = /\.au-sidenav__item--current-section::after\s*\{([^}]*)\}/
+const ACCENT_DECL = /background(?:-color)?\s*:\s*#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})(?![0-9a-fA-F])/
+
+export function detectAccentColor(source: string): string | null {
+  if (typeof source !== 'string' || !source) return null
+  const body = ACCENT_RULE.exec(source)?.[1]
+  if (!body) return null
+  const hex = ACCENT_DECL.exec(body)?.[1]
+  if (!hex) return null
+  const six = hex.length === 3 ? hex.split('').map(c => c + c).join('') : hex
+  return normalizeHex(six)
+}

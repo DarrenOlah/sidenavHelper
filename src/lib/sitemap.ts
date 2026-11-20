@@ -6,6 +6,8 @@
 //
 // Kept free of React so they can be unit-tested with literal HTML strings.
 
+import { detectAccentColor } from './accent'
+
 export interface SitemapNode {
   id: string
   href: string
@@ -32,6 +34,9 @@ export interface ParseResult {
   // pasted HTML is output from a previously-generated menu, not a fresh site
   // index. Enables the Compare-with-Site-Index flow in the App.
   isAuSidenavOutput: boolean
+  // Accent bar color recovered from the pasted menu's <style> block (see
+  // detectAccentColor), or null when the paste carried none.
+  detectedAccentColor: string | null
 }
 
 // ── Parsing ─────────────────────────────────────────────────────────────────
@@ -55,7 +60,7 @@ export function parseSitemapHtml(html: string): ParseResult {
   resetIds()
 
   if (!html || !html.trim()) {
-    return { forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '', isAuSidenavOutput: false }
+    return { forest: [], pageCount: 0, maxDepth: 0, detectedHeaderText: '', isAuSidenavOutput: false, detectedAccentColor: null }
   }
 
   const doc = new DOMParser().parseFromString(html, 'text/html')
@@ -66,6 +71,9 @@ export function parseSitemapHtml(html: string): ParseResult {
     doc.querySelector('.au-sidenav') !== null ||
     doc.querySelector('.au-sidenav__sublist') !== null ||
     doc.querySelector('.au-sidenav__list') !== null
+  // textContent covers both a raw-markup paste (the <style> element's text)
+  // and a code-view paste whose markup arrives entity-escaped inside spans.
+  const detectedAccentColor = detectAccentColor(doc.documentElement?.textContent ?? '')
 
   // Find candidate top-level <ul> elements: every <ul> that is NOT contained
   // inside another <ul>. This covers both "selection includes the wrapper"
@@ -80,14 +88,14 @@ export function parseSitemapHtml(html: string): ParseResult {
     const forest = links
       .map(a => buildLeaf(a as HTMLAnchorElement, baseHref))
       .filter((n): n is SitemapNode => n !== null)
-    return summarize(forest, detectedHeaderText, isAuSidenavOutput)
+    return summarize(forest, detectedHeaderText, isAuSidenavOutput, detectedAccentColor)
   }
 
   const forest: SitemapNode[] = []
   for (const ul of topLists) {
     forest.push(...listToNodes(ul, baseHref))
   }
-  return summarize(forest, detectedHeaderText, isAuSidenavOutput)
+  return summarize(forest, detectedHeaderText, isAuSidenavOutput, detectedAccentColor)
 }
 
 // Pick the clipboard flavor that yields the richer parse. Copying from a
@@ -106,9 +114,13 @@ export function parseBestSitemap(
   const fromHtml = html ? parseSitemapHtml(html) : null
   const fromText = text ? parseSitemapHtml(text) : null
   if (fromHtml && fromText) {
-    return fromText.pageCount > fromHtml.pageCount
+    const pick = fromText.pageCount > fromHtml.pageCount
       ? { result: fromText, source: text }
       : { result: fromHtml, source: html }
+    // The flavor with the richer tree isn't always the one that kept the
+    // <style> block, so fall back to the other flavor's accent color.
+    const accent = fromText.detectedAccentColor ?? fromHtml.detectedAccentColor
+    return { ...pick, result: { ...pick.result, detectedAccentColor: pick.result.detectedAccentColor ?? accent } }
   }
   if (fromHtml) return { result: fromHtml, source: html }
   if (fromText) return { result: fromText, source: text }
@@ -256,7 +268,12 @@ function resolveHref(raw: string, baseHref: string | undefined): string {
   }
 }
 
-function summarize(forest: SitemapNode[], detectedHeaderText = '', isAuSidenavOutput = false): ParseResult {
+function summarize(
+  forest: SitemapNode[],
+  detectedHeaderText = '',
+  isAuSidenavOutput = false,
+  detectedAccentColor: string | null = null,
+): ParseResult {
   let pageCount = 0
   let maxDepth = 0
   function walk(nodes: SitemapNode[], depth: number): void {
@@ -267,7 +284,7 @@ function summarize(forest: SitemapNode[], detectedHeaderText = '', isAuSidenavOu
     }
   }
   walk(forest, 1)
-  return { forest, pageCount, maxDepth, detectedHeaderText, isAuSidenavOutput }
+  return { forest, pageCount, maxDepth, detectedHeaderText, isAuSidenavOutput, detectedAccentColor }
 }
 
 // ── Tree mutations (immutable) ──────────────────────────────────────────────
