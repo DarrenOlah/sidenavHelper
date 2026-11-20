@@ -16,3 +16,8 @@ updates:
     ignore:
       # Pinned to 6.4.2 to match the live site — see commit 5a370d8.
       - dependency-name: "@fortawesome/fontawesome-free"
+      # typescript-eslint 8.x only supports TypeScript <6.1 (and .npmrc's
+      # legacy-peer-deps hides the peer conflict), so hold TS on 6.0.x.
+      # Remove once typescript-eslint supports TS 7.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
