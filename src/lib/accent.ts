@@ -10,7 +10,7 @@ export interface AccentPreset {
 
 export const ACCENT_PRESETS: readonly AccentPreset[] = [
   { name: 'Civilian Blue',         hex: '#B4CFED' },
-  { name: 'NCO Green',             hex: '#087F47' },
+  { name: 'NCO Green',             hex: '#676C4A' },
   { name: 'Warrant Officer Brown', hex: '#804331' },
   { name: 'Command Blue',          hex: '#00427E' },
   { name: 'Army Gold',             hex: '#FFCC33' },
